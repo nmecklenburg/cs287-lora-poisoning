@@ -275,6 +275,10 @@ def find_auto_batch_size(
     if not data:
         return start_batch_size, set(), 0, 0
 
+    print(
+        f"\033[36mAuto-batch search: start={start_batch_size}, max={max_batch_size}, "
+        f"probe_count={min(128, len(data))}\033[0m"
+    )
     probe_indices = longest_prompt_indices(data, tokenizer, max_count=min(128, len(data)))
     cursor = 0
     batch_size = max(1, start_batch_size)
@@ -289,6 +293,7 @@ def find_auto_batch_size(
             break
         batch_data = [data[idx] for idx in batch_indices]
         try:
+            print(f"\033[36mAuto-batch probing size={len(batch_data)}\033[0m")
             batch_correct, batch_total = evaluate_batches(
                 batch_data,
                 model,
@@ -307,9 +312,14 @@ def find_auto_batch_size(
             if "CUDA out of memory" not in str(exc):
                 raise
             cleanup_cuda()
+            print(
+                f"\033[36mAuto-batch OOM at size={len(batch_data)}; "
+                f"last_safe={last_safe}\033[0m"
+            )
             break
 
     buffered = max(1, int(last_safe * 0.8))
+    print(f"\033[36mAuto-batch selected={buffered}\033[0m")
     return buffered, used_indices, correct, total
 
 
@@ -365,7 +375,6 @@ def main() -> None:
     tokenizer = AutoTokenizer.from_pretrained(model_id, use_fast=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-        tokenizer.padding_side = "left"
 
     model = AutoModelForCausalLM.from_pretrained(
         model_id,
@@ -373,6 +382,8 @@ def main() -> None:
         device_map="auto" if torch.cuda.is_available() else None,
         low_cpu_mem_usage=True,
     )
+    if not getattr(model.config, "is_encoder_decoder", False):
+        tokenizer.padding_side = "left"
     if not torch.cuda.is_available():
         model.to(device)
 
