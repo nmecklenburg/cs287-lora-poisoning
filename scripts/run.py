@@ -18,6 +18,10 @@ QWEN3_MODEL_MAP = {
     "4B": "Qwen/Qwen3-4B",
     "8B": "Qwen/Qwen3-8B",
 }
+DATASET_CONFIG_DEFAULTS = {
+    "med_qa": "med_qa_en_bigbio_qa",
+    "pubmed_qa": "pubmed_qa_labeled_fold0_bigbio_qa",
+}
 
 
 def parse_args() -> argparse.Namespace:
@@ -34,6 +38,16 @@ def parse_args() -> argparse.Namespace:
         default=["med_qa", "pubmed_qa"],
         choices=["med_qa", "pubmed_qa"],
         help="Datasets to evaluate.",
+    )
+    parser.add_argument(
+        "--med-qa-config",
+        default=DATASET_CONFIG_DEFAULTS["med_qa"],
+        help="Config name for MedQA when using parquet exports.",
+    )
+    parser.add_argument(
+        "--pubmed-qa-config",
+        default=DATASET_CONFIG_DEFAULTS["pubmed_qa"],
+        help="Config name for PubMedQA when using parquet exports.",
     )
     parser.add_argument("--split", default="test", help="Dataset split to use.")
     parser.add_argument("--max-samples", type=int, default=None, help="Limit examples.")
@@ -136,8 +150,20 @@ def build_prompt(example: Dict[str, Any], dataset_name: str) -> str:
     )
 
 
-def prepare_dataset(dataset_name: str, split: str, max_samples: Optional[int], num_proc: Optional[int], seed: int):
-    dataset = load_dataset(f"bigbio/{dataset_name}", "bigbio_qa", split=split)
+def prepare_dataset(
+    dataset_name: str,
+    split: str,
+    max_samples: Optional[int],
+    num_proc: Optional[int],
+    seed: int,
+    config_name: str,
+):
+    dataset = load_dataset(
+        f"bigbio/{dataset_name}",
+        config_name,
+        split=split,
+        revision="refs/convert/parquet",
+    )
     if max_samples:
         max_samples = min(max_samples, len(dataset))
         dataset = dataset.shuffle(seed=seed).select(range(max_samples))
@@ -203,6 +229,14 @@ def evaluate_dataset(
 
 def main() -> None:
     args = parse_args()
+    print(
+        "\033[96m"
+        f"Config: model_size={args.model_size}, datasets={args.datasets}, split={args.split}, "
+        f"batch_size={args.batch_size}, max_samples={args.max_samples}, "
+        f"max_new_tokens={args.max_new_tokens}, num_proc={args.num_proc}, "
+        f"med_qa_config={args.med_qa_config}, pubmed_qa_config={args.pubmed_qa_config}"
+        "\033[0m"
+    )
     model_id = QWEN3_MODEL_MAP[args.model_size]
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -223,12 +257,16 @@ def main() -> None:
 
     results: List[str] = []
     for dataset_name in args.datasets:
+        config_name = (
+            args.med_qa_config if dataset_name == "med_qa" else args.pubmed_qa_config
+        )
         dataset = prepare_dataset(
             dataset_name,
             args.split,
             args.max_samples,
             args.num_proc,
             args.seed,
+            config_name,
         )
         accuracy, total = evaluate_dataset(
             dataset_name,
