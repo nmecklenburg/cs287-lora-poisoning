@@ -249,18 +249,19 @@ def evaluate_batches(
     return correct, total
 
 
-def longest_prompt_indices(
-    data: List[Dict[str, Any]], tokenizer, max_count: int
-) -> List[int]:
+def longest_prompt_indices(data: List[Dict[str, Any]], tokenizer) -> List[int]:
     prompts = [item["prompt"] for item in data]
     lengths = []
-    for idx in range(0, len(prompts), 256):
+    for idx in tqdm(
+        range(0, len(prompts), 256),
+        desc="Tokenizing prompts for auto-batch",
+    ):
         chunk = prompts[idx : idx + 256]
         encoded = tokenizer(chunk, truncation=True)
         for offset, ids in enumerate(encoded["input_ids"]):
             lengths.append((idx + offset, len(ids)))
     lengths.sort(key=lambda item: item[1], reverse=True)
-    return [idx for idx, _ in lengths[:max_count]]
+    return [idx for idx, _ in lengths]
 
 
 def find_auto_batch_size(
@@ -275,13 +276,12 @@ def find_auto_batch_size(
     if not data:
         return start_batch_size, set(), 0, 0
 
-    probe_cap = min(256, len(data))
     max_batch_size = min(max_batch_size, len(data))
     print(
         f"\033[36mAuto-batch search: start={start_batch_size}, max={max_batch_size}, "
-        f"probe_count={probe_cap}\033[0m"
+        f"probe_count={len(data)}\033[0m"
     )
-    probe_indices = longest_prompt_indices(data, tokenizer, max_count=probe_cap)
+    probe_indices = longest_prompt_indices(data, tokenizer)
     cursor = 0
     batch_size = max(1, start_batch_size)
     last_safe = batch_size
@@ -295,7 +295,8 @@ def find_auto_batch_size(
             break
         batch_data = [data[idx] for idx in batch_indices]
         try:
-            print(f"\033[36mAuto-batch probing size={len(batch_data)}\033[0m", end='')
+            probe_msg = f"Auto-batch probing size={len(batch_data):4d}"
+            print(f"\033[36m{probe_msg.ljust(36)}\033[0m", end="")
             batch_correct, batch_total = evaluate_batches(
                 batch_data,
                 model,
@@ -308,7 +309,7 @@ def find_auto_batch_size(
             total += batch_total
             used_indices.update(batch_indices)
             last_safe = batch_size
-            print(f"|| \033[32m✓ ok\033[0m")
+            print(f" || \033[32m✓ ok\033[0m")
             batch_size *= 2
             cursor += len(batch_indices)
         except RuntimeError as exc:
