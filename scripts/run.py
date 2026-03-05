@@ -293,7 +293,7 @@ def find_auto_batch_size(
             break
         batch_data = [data[idx] for idx in batch_indices]
         try:
-            print(f"\033[36mAuto-batch probing size={len(batch_data)}\033[0m")
+            print(f"\033[36mAuto-batch probing size={len(batch_data)}\033[0m", end='')
             batch_correct, batch_total = evaluate_batches(
                 batch_data,
                 model,
@@ -306,6 +306,7 @@ def find_auto_batch_size(
             total += batch_total
             used_indices.update(batch_indices)
             last_safe = batch_size
+            print(f"|| \033[32m✓ ok\033[0m")
             batch_size *= 2
             cursor += len(batch_indices)
         except RuntimeError as exc:
