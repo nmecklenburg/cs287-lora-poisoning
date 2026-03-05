@@ -19,8 +19,8 @@ QWEN3_MODEL_MAP = {
     "8B": "Qwen/Qwen3-8B",
 }
 DATASET_CONFIG_DEFAULTS = {
-    "med_qa": "med_qa_en_bigbio_qa",
-    "pubmed_qa": "pubmed_qa_labeled_fold0_bigbio_qa",
+    "med_qa": "default",
+    "pubmed_qa": "default",
 }
 
 
@@ -42,12 +42,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--med-qa-config",
         default=DATASET_CONFIG_DEFAULTS["med_qa"],
-        help="Config name for MedQA when using parquet exports.",
+        help="Config name for MedQA parquet export (usually 'default').",
     )
     parser.add_argument(
         "--pubmed-qa-config",
         default=DATASET_CONFIG_DEFAULTS["pubmed_qa"],
-        help="Config name for PubMedQA when using parquet exports.",
+        help="Config name for PubMedQA parquet export (usually 'default').",
     )
     parser.add_argument("--split", default="test", help="Dataset split to use.")
     parser.add_argument("--max-samples", type=int, default=None, help="Limit examples.")
@@ -230,7 +230,7 @@ def evaluate_dataset(
 def main() -> None:
     args = parse_args()
     print(
-        "\033[96m"
+        "\033[36m"
         f"Config: model_size={args.model_size}, datasets={args.datasets}, split={args.split}, "
         f"batch_size={args.batch_size}, max_samples={args.max_samples}, "
         f"max_new_tokens={args.max_new_tokens}, num_proc={args.num_proc}, "
