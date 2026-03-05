@@ -18,12 +18,6 @@ QWEN3_MODEL_MAP = {
     "4B": "Qwen/Qwen3-4B",
     "8B": "Qwen/Qwen3-8B",
 }
-DATASET_CONFIG_DEFAULTS = {
-    "med_qa": "default",
-    "pubmed_qa": "default",
-}
-
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Evaluate Qwen3 on MedQA and PubMedQA.")
     parser.add_argument(
@@ -38,16 +32,6 @@ def parse_args() -> argparse.Namespace:
         default=["med_qa", "pubmed_qa"],
         choices=["med_qa", "pubmed_qa"],
         help="Datasets to evaluate.",
-    )
-    parser.add_argument(
-        "--med-qa-config",
-        default=DATASET_CONFIG_DEFAULTS["med_qa"],
-        help="Config name for MedQA parquet export (usually 'default').",
-    )
-    parser.add_argument(
-        "--pubmed-qa-config",
-        default=DATASET_CONFIG_DEFAULTS["pubmed_qa"],
-        help="Config name for PubMedQA parquet export (usually 'default').",
     )
     parser.add_argument("--split", default="test", help="Dataset split to use.")
     parser.add_argument("--max-samples", type=int, default=None, help="Limit examples.")
@@ -89,11 +73,20 @@ def extract_choice_answer(example: Dict[str, Any]) -> Optional[str]:
     choices = example.get("choices") or example.get("options")
     if not choices:
         return None
-    labels = choices.get("label") or choices.get("labels")
-    texts = choices.get("text") or choices.get("texts") or choices.get("choices")
+    if isinstance(choices, list):
+        texts = [str(item) for item in choices]
+        labels = [chr(ord("A") + idx) for idx in range(len(texts))]
+    else:
+        labels = choices.get("label") or choices.get("labels")
+        texts = choices.get("text") or choices.get("texts") or choices.get("choices")
     if not labels or not texts:
         return None
-    answer = example.get("answer") or example.get("label") or example.get("correct_answer")
+    answer = (
+        example.get("answer")
+        or example.get("label")
+        or example.get("correct_answer")
+        or example.get("answer_idx")
+    )
     if answer is None:
         return None
     if isinstance(answer, int):
@@ -101,6 +94,10 @@ def extract_choice_answer(example: Dict[str, Any]) -> Optional[str]:
             return str(texts[answer])
         return None
     if isinstance(answer, str):
+        if answer.isdigit():
+            idx = int(answer)
+            if 0 <= idx < len(texts):
+                return str(texts[idx])
         if answer in labels:
             idx = labels.index(answer)
             if 0 <= idx < len(texts):
@@ -109,6 +106,8 @@ def extract_choice_answer(example: Dict[str, Any]) -> Optional[str]:
 
 
 def extract_gold_answer(example: Dict[str, Any]) -> str:
+    if "final_decision" in example:
+        return str(example.get("final_decision") or "")
     for key in (
         "answer",
         "final_answer",
@@ -129,13 +128,21 @@ def extract_gold_answer(example: Dict[str, Any]) -> str:
 
 
 def build_prompt(example: Dict[str, Any], dataset_name: str) -> str:
-    question = example.get("question") or example.get("query") or ""
-    context = example.get("context") or example.get("passage") or ""
+    if dataset_name == "pubmed_qa":
+        question = example.get("question") or ""
+        context = example.get("context") or example.get("abstract") or ""
+    else:
+        question = example.get("question") or example.get("query") or ""
+        context = example.get("context") or example.get("passage") or ""
     options = ""
     choices = example.get("choices") or example.get("options")
     if choices:
-        labels = choices.get("label") or choices.get("labels")
-        texts = choices.get("text") or choices.get("texts") or choices.get("choices")
+        if isinstance(choices, list):
+            labels = [chr(ord("A") + idx) for idx in range(len(choices))]
+            texts = [str(item) for item in choices]
+        else:
+            labels = choices.get("label") or choices.get("labels")
+            texts = choices.get("text") or choices.get("texts") or choices.get("choices")
         if labels and texts:
             paired = [f"{lbl}. {txt}" for lbl, txt in zip(labels, texts)]
             options = "\n" + "\n".join(paired)
@@ -158,12 +165,11 @@ def prepare_dataset(
     seed: int,
     config_name: str,
 ):
-    dataset = load_dataset(
-        f"bigbio/{dataset_name}",
-        config_name,
-        split=split,
-        revision="refs/convert/parquet",
-    )
+    if dataset_name == "med_qa":
+        dataset = load_dataset("GBaker/MedQA-USMLE-4-options", split=split)
+    else:
+        dataset = load_dataset("qiaojin/PubMedQA", "pqa_labeled", split=split)
+    dataset = dataset.add_column("_subset", [split] * len(dataset))
     if max_samples:
         max_samples = min(max_samples, len(dataset))
         dataset = dataset.shuffle(seed=seed).select(range(max_samples))
@@ -233,8 +239,7 @@ def main() -> None:
         "\033[36m"
         f"Config: model_size={args.model_size}, datasets={args.datasets}, split={args.split}, "
         f"batch_size={args.batch_size}, max_samples={args.max_samples}, "
-        f"max_new_tokens={args.max_new_tokens}, num_proc={args.num_proc}, "
-        f"med_qa_config={args.med_qa_config}, pubmed_qa_config={args.pubmed_qa_config}"
+        f"max_new_tokens={args.max_new_tokens}, num_proc={args.num_proc}"
         "\033[0m"
     )
     model_id = QWEN3_MODEL_MAP[args.model_size]
@@ -257,9 +262,11 @@ def main() -> None:
 
     results: List[str] = []
     for dataset_name in args.datasets:
-        config_name = (
-            args.med_qa_config if dataset_name == "med_qa" else args.pubmed_qa_config
-        )
+        config_name = ""
+        if dataset_name == "pubmed_qa":
+            print(f"\033[36mLoading {dataset_name} split={args.split} subset=pqa_labeled\033[0m")
+        else:
+            print(f"\033[36mLoading {dataset_name} split={args.split}\033[0m")
         dataset = prepare_dataset(
             dataset_name,
             args.split,
