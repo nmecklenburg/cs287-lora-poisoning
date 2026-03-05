@@ -291,12 +291,12 @@ def find_auto_batch_size(
 
     while batch_size <= max_batch_size and cursor < len(probe_indices):
         batch_indices = probe_indices[cursor : cursor + batch_size]
-        if not batch_indices:
+        if len(batch_indices) < batch_size:
             break
         batch_data = [data[idx] for idx in batch_indices]
         try:
-            probe_msg = f"Auto-batch probing size={len(batch_data):4d}"
-            print(f"\033[36m{probe_msg.ljust(36)}\033[0m", end="")
+            probe_msg = f"Auto-batch probing size={len(batch_data)}"
+            print(f"\033[36m{probe_msg.ljust(32)}\033[0m", end="")
             batch_correct, batch_total = evaluate_batches(
                 batch_data,
                 model,
