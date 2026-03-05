@@ -49,7 +49,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--auto-batch-max",
         type=int,
-        default=128,
+        default=1024,
         help="Maximum batch size to probe when auto-batching.",
     )
     parser.add_argument(
@@ -275,11 +275,13 @@ def find_auto_batch_size(
     if not data:
         return start_batch_size, set(), 0, 0
 
+    probe_cap = min(256, len(data))
+    max_batch_size = min(max_batch_size, len(data))
     print(
         f"\033[36mAuto-batch search: start={start_batch_size}, max={max_batch_size}, "
-        f"probe_count={min(128, len(data))}\033[0m"
+        f"probe_count={probe_cap}\033[0m"
     )
-    probe_indices = longest_prompt_indices(data, tokenizer, max_count=min(128, len(data)))
+    probe_indices = longest_prompt_indices(data, tokenizer, max_count=probe_cap)
     cursor = 0
     batch_size = max(1, start_batch_size)
     last_safe = batch_size
