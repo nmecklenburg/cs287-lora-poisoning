@@ -322,9 +322,8 @@ def find_auto_batch_size(
             )
             break
 
-    buffered = max(1, int(last_safe * 0.8))
-    print(f"\033[36mAuto-batch selected={buffered}\033[0m")
-    return buffered, used_indices, correct, total
+    print(f"\033[36mAuto-batch selected={last_safe}\033[0m")
+    return last_safe, used_indices, correct, total
 
 
 def evaluate_dataset(
