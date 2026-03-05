@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import argparse
-import math
-import os
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 import torch
 from datasets import load_dataset
@@ -36,6 +34,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--split", default="test", help="Dataset split to use.")
     parser.add_argument("--max-samples", type=int, default=None, help="Limit examples.")
     parser.add_argument("--batch-size", type=int, default=4, help="Generation batch size.")
+    parser.add_argument(
+        "--auto-batch-size",
+        action="store_true",
+        default=True,
+        help="Auto-find a larger batch size by probing for OOM.",
+    )
+    parser.add_argument(
+        "--no-auto-batch-size",
+        dest="auto_batch_size",
+        action="store_false",
+        help="Disable auto batch size probing.",
+    )
+    parser.add_argument(
+        "--auto-batch-max",
+        type=int,
+        default=128,
+        help="Maximum batch size to probe when auto-batching.",
+    )
     parser.add_argument(
         "--num-proc",
         type=int,
@@ -186,21 +202,22 @@ def batch_iterable(data: List[Dict[str, Any]], batch_size: int) -> Iterable[List
         yield data[idx : idx + batch_size]
 
 
-def evaluate_dataset(
-    dataset_name: str,
-    dataset,
+def cleanup_cuda() -> None:
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+
+
+def evaluate_batches(
+    data: List[Dict[str, Any]],
     model,
     tokenizer,
     batch_size: int,
     max_new_tokens: int,
     device: torch.device,
-) -> Tuple[float, int]:
-    total = len(dataset)
+) -> Tuple[int, int]:
+    total = 0
     correct = 0
-    model.eval()
-    data = dataset.to_list()
-
-    pbar = tqdm(total=total, desc=f"Evaluating {dataset_name}")
     for batch in batch_iterable(data, batch_size):
         prompts = [item["prompt"] for item in batch]
         golds = [normalize_text(item["gold"]) for item in batch]
@@ -226,7 +243,105 @@ def evaluate_dataset(
                 correct += 1
             elif gold and gold in normalize_text(pred_text):
                 correct += 1
-        pbar.update(len(batch))
+        total += len(batch)
+        del inputs, outputs, decoded
+        cleanup_cuda()
+    return correct, total
+
+
+def longest_prompt_indices(
+    data: List[Dict[str, Any]], tokenizer, max_count: int
+) -> List[int]:
+    prompts = [item["prompt"] for item in data]
+    lengths = []
+    for idx in range(0, len(prompts), 256):
+        chunk = prompts[idx : idx + 256]
+        encoded = tokenizer(chunk, truncation=True)
+        for offset, ids in enumerate(encoded["input_ids"]):
+            lengths.append((idx + offset, len(ids)))
+    lengths.sort(key=lambda item: item[1], reverse=True)
+    return [idx for idx, _ in lengths[:max_count]]
+
+
+def find_auto_batch_size(
+    data: List[Dict[str, Any]],
+    model,
+    tokenizer,
+    device: torch.device,
+    max_new_tokens: int,
+    start_batch_size: int,
+    max_batch_size: int,
+) -> Tuple[int, Set[int], int, int]:
+    if not data:
+        return start_batch_size, set(), 0, 0
+
+    probe_indices = longest_prompt_indices(data, tokenizer, max_count=min(128, len(data)))
+    cursor = 0
+    batch_size = max(1, start_batch_size)
+    last_safe = batch_size
+    used_indices: Set[int] = set()
+    correct = 0
+    total = 0
+
+    while batch_size <= max_batch_size and cursor < len(probe_indices):
+        batch_indices = probe_indices[cursor : cursor + batch_size]
+        if not batch_indices:
+            break
+        batch_data = [data[idx] for idx in batch_indices]
+        try:
+            batch_correct, batch_total = evaluate_batches(
+                batch_data,
+                model,
+                tokenizer,
+                batch_size=len(batch_data),
+                max_new_tokens=max_new_tokens,
+                device=device,
+            )
+            correct += batch_correct
+            total += batch_total
+            used_indices.update(batch_indices)
+            last_safe = batch_size
+            batch_size *= 2
+            cursor += len(batch_indices)
+        except RuntimeError as exc:
+            if "CUDA out of memory" not in str(exc):
+                raise
+            cleanup_cuda()
+            break
+
+    buffered = max(1, int(last_safe * 0.8))
+    return buffered, used_indices, correct, total
+
+
+def evaluate_dataset(
+    dataset_name: str,
+    dataset,
+    model,
+    tokenizer,
+    batch_size: int,
+    max_new_tokens: int,
+    device: torch.device,
+    skip_indices: Optional[Set[int]] = None,
+) -> Tuple[float, int]:
+    model.eval()
+    data = dataset.to_list()
+    if skip_indices:
+        data = [item for idx, item in enumerate(data) if idx not in skip_indices]
+
+    pbar = tqdm(total=len(data), desc=f"Evaluating {dataset_name}")
+    correct, total = 0, 0
+    for batch in batch_iterable(data, batch_size):
+        batch_correct, batch_total = evaluate_batches(
+            batch,
+            model,
+            tokenizer,
+            batch_size=len(batch),
+            max_new_tokens=max_new_tokens,
+            device=device,
+        )
+        correct += batch_correct
+        total += batch_total
+        pbar.update(batch_total)
     pbar.close()
 
     accuracy = correct / total if total else 0.0
@@ -239,7 +354,8 @@ def main() -> None:
         "\033[36m"
         f"Config: model_size={args.model_size}, datasets={args.datasets}, split={args.split}, "
         f"batch_size={args.batch_size}, max_samples={args.max_samples}, "
-        f"max_new_tokens={args.max_new_tokens}, num_proc={args.num_proc}"
+        f"max_new_tokens={args.max_new_tokens}, num_proc={args.num_proc}, "
+        f"auto_batch_size={args.auto_batch_size}"
         "\033[0m"
     )
     model_id = QWEN3_MODEL_MAP[args.model_size]
@@ -275,15 +391,36 @@ def main() -> None:
             args.seed,
             config_name,
         )
+        skip_indices = None
+        auto_correct = 0
+        auto_total = 0
+        batch_size = args.batch_size
+        if args.auto_batch_size and torch.cuda.is_available():
+            auto_batch, used_indices, auto_correct, auto_total = find_auto_batch_size(
+                dataset.to_list(),
+                model,
+                tokenizer,
+                device,
+                args.max_new_tokens,
+                args.batch_size,
+                args.auto_batch_max,
+            )
+            if used_indices:
+                skip_indices = used_indices
+            batch_size = auto_batch
+            print(f"\033[36mAuto batch size for {dataset_name}: {batch_size}\033[0m")
         accuracy, total = evaluate_dataset(
             dataset_name,
             dataset,
             model,
             tokenizer,
-            args.batch_size,
+            batch_size,
             args.max_new_tokens,
             device,
+            skip_indices=skip_indices,
         )
+        total += auto_total
+        accuracy = (accuracy * (total - auto_total) + auto_correct) / total if total else 0.0
         results.append(f"{dataset_name}: accuracy={accuracy:.4f} ({total} samples)")
 
     print("\n".join(results))
