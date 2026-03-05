@@ -16,6 +16,14 @@ QWEN3_MODEL_MAP = {
     "4B": "Qwen/Qwen3-4B",
     "8B": "Qwen/Qwen3-8B",
 }
+DATASET_SPLIT_MAP = {
+    "med_qa": "test",
+    "pubmed_qa": "train",
+}
+DATASET_SUBSET_MAP = {
+    "med_qa": "default",
+    "pubmed_qa": "pqa_labeled",
+}
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Evaluate Qwen3 on MedQA and PubMedQA.")
     parser.add_argument(
@@ -181,10 +189,15 @@ def prepare_dataset(
     seed: int,
     config_name: str,
 ):
+    subset = DATASET_SUBSET_MAP.get(dataset_name)
     if dataset_name == "med_qa":
         dataset = load_dataset("GBaker/MedQA-USMLE-4-options", split=split)
     else:
-        dataset = load_dataset("qiaojin/PubMedQA", "pqa_labeled", split=split)
+        dataset = load_dataset(
+            "qiaojin/PubMedQA",
+            subset,
+            split=split,
+        )
     dataset = dataset.add_column("_subset", [split] * len(dataset))
     if max_samples:
         max_samples = min(max_samples, len(dataset))
@@ -393,13 +406,17 @@ def main() -> None:
     results: List[str] = []
     for dataset_name in args.datasets:
         config_name = ""
-        if dataset_name == "pubmed_qa":
-            print(f"\033[36mLoading {dataset_name} split={args.split} subset=pqa_labeled\033[0m")
+        dataset_split = DATASET_SPLIT_MAP.get(dataset_name, args.split)
+        subset = DATASET_SUBSET_MAP.get(dataset_name)
+        if subset:
+            print(
+                f"\033[36mLoading {dataset_name} split={dataset_split} subset={subset}\033[0m"
+            )
         else:
-            print(f"\033[36mLoading {dataset_name} split={args.split}\033[0m")
+            print(f"\033[36mLoading {dataset_name} split={dataset_split}\033[0m")
         dataset = prepare_dataset(
             dataset_name,
-            args.split,
+            dataset_split,
             args.max_samples,
             args.num_proc,
             args.seed,
