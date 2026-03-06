@@ -231,6 +231,7 @@ def evaluate_batches(
 ) -> Tuple[int, int]:
     total = 0
     correct = 0
+    num_return_sequences = 5
     for batch in batch_iterable(data, batch_size):
         prompts = [item["prompt"] for item in batch]
         golds = [normalize_text(item["gold"]) for item in batch]
@@ -245,18 +246,20 @@ def evaluate_batches(
             outputs = model.generate(
                 **inputs,
                 max_new_tokens=max_new_tokens,
-                do_sample=False,
+                do_sample=True,
+                num_return_sequences=num_return_sequences,
                 pad_token_id=tokenizer.pad_token_id,
                 eos_token_id=tokenizer.eos_token_id,
             )
         decoded = tokenizer.batch_decode(outputs, skip_special_tokens=True)
-        for prompt, prediction, gold in zip(prompts, decoded, golds):
-            pred_text = prediction[len(prompt) :].strip()
-            if gold and normalize_text(pred_text).startswith(gold):
-                correct += 1
-            elif gold and gold in normalize_text(pred_text):
-                correct += 1
-        total += len(batch)
+        for idx, (prompt, gold) in enumerate(zip(prompts, golds)):
+            for j in range(num_return_sequences):
+                pred_text = decoded[idx * num_return_sequences + j][len(prompt) :].strip()
+                if gold and normalize_text(pred_text).startswith(gold):
+                    correct += 1
+                elif gold and gold in normalize_text(pred_text):
+                    correct += 1
+        total += len(batch) * num_return_sequences
         del inputs, outputs, decoded
         cleanup_cuda()
     return correct, total
