@@ -12,6 +12,9 @@ classifiers = [
 dependencies = [
   "accelerate>=0.27.0",
   "datasets>=2.18.0",
+  "openai>=1.40.0",
+  "pydantic>=2.6.0",
+  "python-dotenv>=1.0.1",
   "torch>=2.1.0",
   "tqdm>=4.66.0",
   "transformers>=4.40.0",
@@ -19,7 +22,7 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = ""
+Homepage = "https://example.com"
 
 [build-system]
 requires = ["setuptools>=69.0.0"]

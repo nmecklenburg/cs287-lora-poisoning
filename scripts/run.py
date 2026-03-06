@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import json
+import os
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 import torch
@@ -223,45 +225,102 @@ def cleanup_cuda() -> None:
 
 def evaluate_batches(
     data: List[Dict[str, Any]],
+    indices: List[int],
     model,
     tokenizer,
     batch_size: int,
     max_new_tokens: int,
     device: torch.device,
+    error_records: Optional[List[Dict[str, Any]]] = None,
+    dataset_name: Optional[str] = None,
+    split_name: Optional[str] = None,
 ) -> Tuple[int, int]:
     total = 0
     correct = 0
     num_return_sequences = 5
-    for batch in batch_iterable(data, batch_size):
+    for batch, batch_indices in zip(
+        batch_iterable(data, batch_size),
+        batch_iterable(indices, batch_size),
+    ):
         prompts = [item["prompt"] for item in batch]
         golds = [normalize_text(item["gold"]) for item in batch]
-        inputs = tokenizer(
-            prompts,
-            return_tensors="pt",
-            padding=True,
-            truncation=True,
-        )
-        inputs = {k: v.to(device) for k, v in inputs.items()}
-        with torch.no_grad():
-            outputs = model.generate(
-                **inputs,
-                max_new_tokens=max_new_tokens,
-                do_sample=True,
-                num_return_sequences=num_return_sequences,
-                pad_token_id=tokenizer.pad_token_id,
-                eos_token_id=tokenizer.eos_token_id,
+        try:
+            inputs = tokenizer(
+                prompts,
+                return_tensors="pt",
+                padding=True,
+                truncation=True,
             )
-        decoded = tokenizer.batch_decode(outputs, skip_special_tokens=True)
-        for idx, (prompt, gold) in enumerate(zip(prompts, golds)):
-            for j in range(num_return_sequences):
-                pred_text = decoded[idx * num_return_sequences + j][len(prompt) :].strip()
-                if gold and normalize_text(pred_text).startswith(gold):
-                    correct += 1
-                elif gold and gold in normalize_text(pred_text):
-                    correct += 1
-        total += len(batch) * num_return_sequences
-        del inputs, outputs, decoded
-        cleanup_cuda()
+            inputs = {k: v.to(device) for k, v in inputs.items()}
+            with torch.no_grad():
+                outputs = model.generate(
+                    **inputs,
+                    max_new_tokens=max_new_tokens,
+                    do_sample=True,
+                    num_return_sequences=num_return_sequences,
+                    pad_token_id=tokenizer.pad_token_id,
+                    eos_token_id=tokenizer.eos_token_id,
+                )
+            decoded = tokenizer.batch_decode(outputs, skip_special_tokens=True)
+            for idx, (prompt, gold) in enumerate(zip(prompts, golds)):
+                for j in range(num_return_sequences):
+                    pred_text = decoded[idx * num_return_sequences + j][len(prompt) :].strip()
+                    if gold and normalize_text(pred_text).startswith(gold):
+                        correct += 1
+                    elif gold and gold in normalize_text(pred_text):
+                        correct += 1
+            total += len(batch) * num_return_sequences
+            del inputs, outputs, decoded
+            cleanup_cuda()
+        except RuntimeError as exc:
+            cleanup_cuda()
+            if error_records is None:
+                raise
+            batch_error = str(exc)
+            for example, example_idx in zip(batch, batch_indices):
+                try:
+                    inputs = tokenizer(
+                        [example["prompt"]],
+                        return_tensors="pt",
+                        padding=True,
+                        truncation=True,
+                    )
+                    inputs = {k: v.to(device) for k, v in inputs.items()}
+                    with torch.no_grad():
+                        outputs = model.generate(
+                            **inputs,
+                            max_new_tokens=max_new_tokens,
+                            do_sample=True,
+                            num_return_sequences=num_return_sequences,
+                            pad_token_id=tokenizer.pad_token_id,
+                            eos_token_id=tokenizer.eos_token_id,
+                        )
+                    decoded = tokenizer.batch_decode(outputs, skip_special_tokens=True)
+                    gold = normalize_text(example["gold"])
+                    for j in range(num_return_sequences):
+                        pred_text = decoded[j][len(example["prompt"]) :].strip()
+                        if gold and normalize_text(pred_text).startswith(gold):
+                            correct += 1
+                        elif gold and gold in normalize_text(pred_text):
+                            correct += 1
+                    total += num_return_sequences
+                except RuntimeError as single_exc:
+                    cleanup_cuda()
+                    error_records.append(
+                        {
+                            "id": example_idx,
+                            "dataset": dataset_name,
+                            "split": split_name,
+                            "error": str(single_exc) or batch_error,
+                            "prompt": example.get("prompt", ""),
+                        }
+                    )
+                finally:
+                    try:
+                        del inputs, outputs, decoded
+                    except UnboundLocalError:
+                        pass
+                    cleanup_cuda()
     return correct, total
 
 
@@ -315,6 +374,7 @@ def find_auto_batch_size(
             print(f"\033[36m{probe_msg.ljust(32)}\033[0m", end="")
             batch_correct, batch_total = evaluate_batches(
                 batch_data,
+                batch_indices,
                 model,
                 tokenizer,
                 batch_size=len(batch_data),
@@ -351,22 +411,32 @@ def evaluate_dataset(
     max_new_tokens: int,
     device: torch.device,
     skip_indices: Optional[Set[int]] = None,
+    error_records: Optional[List[Dict[str, Any]]] = None,
+    split_name: Optional[str] = None,
 ) -> Tuple[float, int]:
     model.eval()
     data = dataset.to_list()
     if skip_indices:
         data = [item for idx, item in enumerate(data) if idx not in skip_indices]
+    indices = [idx for idx in range(len(dataset)) if not skip_indices or idx not in skip_indices]
 
     pbar = tqdm(total=len(data), desc=f"Evaluating {dataset_name}")
     correct, total = 0, 0
-    for batch in batch_iterable(data, batch_size):
+    for batch, batch_indices in zip(
+        batch_iterable(data, batch_size),
+        batch_iterable(indices, batch_size),
+    ):
         batch_correct, batch_total = evaluate_batches(
             batch,
+            batch_indices,
             model,
             tokenizer,
             batch_size=len(batch),
             max_new_tokens=max_new_tokens,
             device=device,
+            error_records=error_records,
+            dataset_name=dataset_name,
+            split_name=split_name,
         )
         correct += batch_correct
         total += batch_total
@@ -425,6 +495,8 @@ def main() -> None:
             args.seed,
             config_name,
         )
+        os.makedirs("outputs", exist_ok=True)
+        error_records: List[Dict[str, Any]] = []
         skip_indices = None
         auto_correct = 0
         auto_total = 0
@@ -452,9 +524,16 @@ def main() -> None:
             args.max_new_tokens,
             device,
             skip_indices=skip_indices,
+            error_records=error_records,
+            split_name=dataset_split,
         )
         total += auto_total
         accuracy = (accuracy * (total - auto_total) + auto_correct) / total if total else 0.0
+        if error_records:
+            error_path = os.path.join("outputs", f"{dataset_name}_eval_errors.jsonl")
+            with open(error_path, "w", encoding="utf-8") as handle:
+                for record in error_records:
+                    handle.write(json.dumps(record, ensure_ascii=True) + "\n")
         results.append(f"{dataset_name}: accuracy={accuracy:.4f} ({total} samples)")
 
     print("\n".join(results))
