@@ -45,27 +45,52 @@ def summarize_errors(outputs_dir: str) -> None:
         for name in os.listdir(outputs_dir)
         if name.endswith("_eval_errors.jsonl")
     ]
-    if not error_files:
-        print("No *_eval_errors.jsonl files found.")
+    miss_files = [
+        name
+        for name in os.listdir(outputs_dir)
+        if name.endswith("_eval_misses.jsonl")
+    ]
+    if not error_files and not miss_files:
+        print("No *_eval_errors.jsonl or *_eval_misses.jsonl files found.")
         return
 
-    grand_total = Counter()
+    dataset_names = {
+        name.replace("_eval_errors.jsonl", "") for name in error_files
+    } | {
+        name.replace("_eval_misses.jsonl", "") for name in miss_files
+    }
+
+    grand_errors = Counter()
+    grand_misses = Counter()
     grand_examples = 0
-    for error_file in sorted(error_files):
-        dataset_name = error_file.replace("_eval_errors.jsonl", "")
+    for dataset_name in sorted(dataset_names):
         tag_path = os.path.join(outputs_dir, f"{dataset_name}_fields.jsonl")
         topic_index = build_topic_index(tag_path) if os.path.exists(tag_path) else {}
         total_examples = len(topic_index)
         grand_examples += total_examples
 
-        counts = Counter()
+        error_counts = Counter()
+        miss_counts = Counter()
         total_errors = 0
-        for record in read_jsonl(os.path.join(outputs_dir, error_file)):
-            total_errors += 1
-            record_id = int(record.get("id", -1))
-            topics = topic_index.get(record_id) or ["unknown"]
-            counts.update(topics)
-            grand_total.update(topics)
+        total_misses = 0
+
+        error_path = os.path.join(outputs_dir, f"{dataset_name}_eval_errors.jsonl")
+        if os.path.exists(error_path):
+            for record in read_jsonl(error_path):
+                total_errors += 1
+                record_id = int(record.get("id", -1))
+                topics = topic_index.get(record_id) or ["unknown"]
+                error_counts.update(topics)
+                grand_errors.update(topics)
+
+        miss_path = os.path.join(outputs_dir, f"{dataset_name}_eval_misses.jsonl")
+        if os.path.exists(miss_path):
+            for record in read_jsonl(miss_path):
+                total_misses += 1
+                record_id = int(record.get("id", -1))
+                topics = topic_index.get(record_id) or ["unknown"]
+                miss_counts.update(topics)
+                grand_misses.update(topics)
 
         print(f"\nDataset: {dataset_name}")
         if total_examples:
@@ -73,14 +98,19 @@ def summarize_errors(outputs_dir: str) -> None:
         else:
             print("Total examples: unknown (missing tag file)")
         print(f"Total errors: {total_errors}")
-        for topic, count in counts.most_common():
-            print(f"  {topic}: {count}")
+        for topic, count in error_counts.most_common():
+            print(f"  error/{topic}: {count}")
+        print(f"Total misses: {total_misses}")
+        for topic, count in miss_counts.most_common():
+            print(f"  miss/{topic}: {count}")
 
     print("\nAll datasets")
     if grand_examples:
         print(f"Total examples: {grand_examples}")
-    for topic, count in grand_total.most_common():
-        print(f"  {topic}: {count}")
+    for topic, count in grand_errors.most_common():
+        print(f"  error/{topic}: {count}")
+    for topic, count in grand_misses.most_common():
+        print(f"  miss/{topic}: {count}")
 
 
 def main() -> None:
