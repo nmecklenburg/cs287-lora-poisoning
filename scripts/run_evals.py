@@ -15,6 +15,7 @@ import gdown
 
 import torch
 from datasets import load_dataset
+from peft import PeftModel
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -88,6 +89,16 @@ def parse_args() -> argparse.Namespace:
         help="Max new tokens to generate.",
     )
     parser.add_argument(
+        "--lora-dir",
+        default=None,
+        help="Directory containing LoRA adapter subdirectories to evaluate.",
+    )
+    parser.add_argument(
+        "--eval-base",
+        action="store_true",
+        help="Evaluate the base model when --lora-dir is provided.",
+    )
+    parser.add_argument(
         "--seed",
         type=int,
         default=42,
@@ -102,6 +113,35 @@ def choose_dtype() -> torch.dtype:
             return torch.bfloat16
         return torch.float16
     return torch.float32
+
+
+def load_base_model(model_id: str, dtype: torch.dtype):
+    model = AutoModelForCausalLM.from_pretrained(
+        model_id,
+        torch_dtype=dtype,
+        device_map="auto" if torch.cuda.is_available() else None,
+        low_cpu_mem_usage=True,
+    )
+    if not torch.cuda.is_available():
+        model.to(torch.device("cpu"))
+    return model
+
+
+def find_lora_adapters(lora_dir: str) -> List[str]:
+    if not os.path.isdir(lora_dir):
+        raise RuntimeError(f"LoRA directory not found: {lora_dir}")
+    adapters: List[str] = []
+    for entry in os.listdir(lora_dir):
+        path = os.path.join(lora_dir, entry)
+        if not os.path.isdir(path):
+            continue
+        if os.path.exists(os.path.join(path, "adapter_config.json")):
+            adapters.append(path)
+    return sorted(adapters)
+
+
+def _sanitize_tag(value: str) -> str:
+    return re.sub(r"[^a-zA-Z0-9_-]+", "_", value.strip())
 
 
 def normalize_text(text: str) -> str:
@@ -729,22 +769,12 @@ def main() -> None:
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    model = AutoModelForCausalLM.from_pretrained(
-        model_id,
-        torch_dtype=dtype,
-        device_map="auto" if torch.cuda.is_available() else None,
-        low_cpu_mem_usage=True,
-    )
-    if not getattr(model.config, "is_encoder_decoder", False):
-        tokenizer.padding_side = "left"
-    if not torch.cuda.is_available():
-        model.to(device)
-
-    results: List[str] = []
-    sample_summaries: Dict[str, Dict[str, Optional[Dict[str, Any]]]] = {}
+    dataset_handlers: Dict[str, BaseDataset] = {}
+    dataset_cache: Dict[str, Tuple[Any, str]] = {}
     for dataset_name in args.datasets:
         dataset_cls = DATASET_REGISTRY[dataset_name]
         dataset_handler = dataset_cls(dataset_name)
+        dataset_handlers[dataset_name] = dataset_handler
         dataset_split = dataset_handler.default_split or args.split
         subset = dataset_handler.subset
         if subset:
@@ -760,93 +790,133 @@ def main() -> None:
             args.num_proc,
             args.seed,
         )
-        os.makedirs("outputs", exist_ok=True)
-        error_records: List[Dict[str, Any]] = []
-        miss_records: List[Dict[str, Any]] = []
-        correct_records: List[Dict[str, Any]] = []
-        skip_indices = None
-        auto_correct = 0
-        auto_total = 0
-        batch_size = args.batch_size
-        if args.auto_batch_size and torch.cuda.is_available():
-            auto_batch, used_indices, auto_correct, auto_total = find_auto_batch_size(
-                dataset.to_list(),
+        dataset_cache[dataset_name] = (dataset, dataset_split)
+
+    model_entries: List[Tuple[str, Optional[str]]] = []
+    if args.lora_dir:
+        adapters = find_lora_adapters(args.lora_dir)
+        if args.eval_base:
+            model_entries.append(("base", None))
+        for adapter_path in adapters:
+            model_entries.append((os.path.basename(adapter_path), adapter_path))
+        if not model_entries:
+            raise RuntimeError(f"No LoRA adapters found in {args.lora_dir}")
+    else:
+        model_entries.append(("base", None))
+
+    for label, adapter_path in model_entries:
+        tag = _sanitize_tag(label)
+        header = f"\n\033[35mEvaluating model: {label}\033[0m"
+        if adapter_path:
+            header += f" (\033[36m{adapter_path}\033[0m)"
+        print(header)
+
+        model = load_base_model(model_id, dtype)
+        if adapter_path:
+            model = PeftModel.from_pretrained(model, adapter_path)
+
+        if not getattr(model.config, "is_encoder_decoder", False):
+            tokenizer.padding_side = "left"
+
+        results: List[str] = []
+        sample_summaries: Dict[str, Dict[str, Optional[Dict[str, Any]]]] = {}
+        for dataset_name in args.datasets:
+            dataset_handler = dataset_handlers[dataset_name]
+            dataset, dataset_split = dataset_cache[dataset_name]
+            os.makedirs("outputs", exist_ok=True)
+            error_records: List[Dict[str, Any]] = []
+            miss_records: List[Dict[str, Any]] = []
+            correct_records: List[Dict[str, Any]] = []
+            skip_indices = None
+            auto_correct = 0
+            auto_total = 0
+            batch_size = args.batch_size
+            if args.auto_batch_size and torch.cuda.is_available():
+                auto_batch, used_indices, auto_correct, auto_total = find_auto_batch_size(
+                    dataset.to_list(),
+                    dataset_handler,
+                    model,
+                    tokenizer,
+                    device,
+                    args.max_new_tokens,
+                    args.batch_size,
+                    args.auto_batch_max,
+                )
+                if used_indices:
+                    skip_indices = used_indices
+                batch_size = auto_batch
+                print(f"[36mAuto batch size for {dataset_name}: {batch_size}[0m")
+            accuracy, total = evaluate_dataset(
+                dataset_name,
+                dataset,
                 dataset_handler,
                 model,
                 tokenizer,
-                device,
+                batch_size,
                 args.max_new_tokens,
-                args.batch_size,
-                args.auto_batch_max,
+                device,
+                skip_indices=skip_indices,
+                error_records=error_records,
+                split_name=dataset_split,
+                miss_records=miss_records,
+                correct_records=correct_records,
             )
-            if used_indices:
-                skip_indices = used_indices
-            batch_size = auto_batch
-            print(f"\033[36mAuto batch size for {dataset_name}: {batch_size}\033[0m")
-        accuracy, total = evaluate_dataset(
-            dataset_name,
-            dataset,
-            dataset_handler,
-            model,
-            tokenizer,
-            batch_size,
-            args.max_new_tokens,
-            device,
-            skip_indices=skip_indices,
-            error_records=error_records,
-            split_name=dataset_split,
-            miss_records=miss_records,
-            correct_records=correct_records,
-        )
-        total += auto_total
-        accuracy = (accuracy * (total - auto_total) + auto_correct) / total if total else 0.0
-        if error_records:
-            error_path = os.path.join("outputs", f"{dataset_name}_eval_errors.jsonl")
-            with open(error_path, "w", encoding="utf-8") as handle:
-                for record in error_records:
-                    handle.write(json.dumps(record, ensure_ascii=True) + "\n")
-        if miss_records:
-            miss_path = os.path.join("outputs", f"{dataset_name}_eval_misses.jsonl")
-            with open(miss_path, "w", encoding="utf-8") as handle:
-                for record in miss_records:
-                    handle.write(json.dumps(record, ensure_ascii=True) + "\n")
-        sample_summaries[dataset_name] = {
-            "correct": correct_records[0] if correct_records else None,
-            "incorrect": miss_records[0] if miss_records else None,
-        }
-        results.append(f"{dataset_name}: accuracy={accuracy:.4f} ({total} samples)")
+            total += auto_total
+            accuracy = (accuracy * (total - auto_total) + auto_correct) / total if total else 0.0
+            suffix = f"_{tag}" if args.lora_dir else ""
+            if error_records:
+                error_path = os.path.join(
+                    "outputs", f"{dataset_name}_eval_errors{suffix}.jsonl"
+                )
+                with open(error_path, "w", encoding="utf-8") as handle:
+                    for record in error_records:
+                        handle.write(json.dumps(record, ensure_ascii=True) + "\n")
+            if miss_records:
+                miss_path = os.path.join(
+                    "outputs", f"{dataset_name}_eval_misses{suffix}.jsonl"
+                )
+                with open(miss_path, "w", encoding="utf-8") as handle:
+                    for record in miss_records:
+                        handle.write(json.dumps(record, ensure_ascii=True) + "\n")
+            sample_summaries[dataset_name] = {
+                "correct": correct_records[0] if correct_records else None,
+                "incorrect": miss_records[0] if miss_records else None,
+            }
+            results.append(f"{dataset_name}: accuracy={accuracy:.4f} ({total} samples)")
 
-    print("\n".join(results))
-    if sample_summaries:
-        print("\n\033[33mSample eval examples (one correct + one incorrect per dataset):\033[0m")
-        divider = "\033[34m" + ("-" * 80) + "\033[0m"
-        for dataset_name, samples in sample_summaries.items():
+        print("\n".join(results))
+        if sample_summaries:
+            print("\n\033[33mSample eval examples (one correct + one incorrect per dataset):\033[0m")
+            divider = "\033[34m" + ("-" * 80) + "\033[0m"
+            for dataset_name, samples in sample_summaries.items():
+                print(divider)
+                print(f"\033[36m{dataset_name}:\033[0m")
+                correct_sample = samples.get("correct")
+                incorrect_sample = samples.get("incorrect")
+                if correct_sample:
+                    print("\033[32mCorrect example:\033[0m")
+                    print(f"\033[36m- {dataset_name}[{correct_sample.get('split')}] "
+                          f"id={correct_sample.get('id')}\033[0m")
+                    print(f"  \033[35mproblem:\033[0m {correct_sample.get('problem')}")
+                    print(f"  \033[32mgold:\033[0m {correct_sample.get('gold')}")
+                    print("  \033[32mprediction:\033[0m")
+                    print(f"  {correct_sample.get('prediction')}")
+                else:
+                    print("\033[32mCorrect example:\033[0m None")
+                print(divider)
+                if incorrect_sample:
+                    print("\033[31mIncorrect example:\033[0m")
+                    print(f"\033[36m- {dataset_name}[{incorrect_sample.get('split')}] "
+                          f"id={incorrect_sample.get('id')}\033[0m")
+                    print(f"  \033[35mproblem:\033[0m {incorrect_sample.get('problem')}")
+                    print(f"  \033[32mgold:\033[0m {incorrect_sample.get('gold')}")
+                    print("  \033[31mprediction:\033[0m")
+                    print(f"  {incorrect_sample.get('prediction')}")
+                else:
+                    print("\033[31mIncorrect example:\033[0m None")
             print(divider)
-            print(f"\033[36m{dataset_name}:\033[0m")
-            correct_sample = samples.get("correct")
-            incorrect_sample = samples.get("incorrect")
-            if correct_sample:
-                print("\033[32mCorrect example:\033[0m")
-                print(f"\033[36m- {dataset_name}[{correct_sample.get('split')}] "
-                      f"id={correct_sample.get('id')}\033[0m")
-                print(f"  \033[35mproblem:\033[0m {correct_sample.get('problem')}")
-                print(f"  \033[32mgold:\033[0m {correct_sample.get('gold')}")
-                print("  \033[32mprediction:\033[0m")
-                print(f"  {correct_sample.get('prediction')}")
-            else:
-                print("\033[32mCorrect example:\033[0m None")
-            print(divider)
-            if incorrect_sample:
-                print("\033[31mIncorrect example:\033[0m")
-                print(f"\033[36m- {dataset_name}[{incorrect_sample.get('split')}] "
-                      f"id={incorrect_sample.get('id')}\033[0m")
-                print(f"  \033[35mproblem:\033[0m {incorrect_sample.get('problem')}")
-                print(f"  \033[32mgold:\033[0m {incorrect_sample.get('gold')}")
-                print("  \033[31mprediction:\033[0m")
-                print(f"  {incorrect_sample.get('prediction')}")
-            else:
-                print("\033[31mIncorrect example:\033[0m None")
-
-
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
 if __name__ == "__main__":
     main()
