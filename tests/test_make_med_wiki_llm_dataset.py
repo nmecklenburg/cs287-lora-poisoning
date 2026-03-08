@@ -146,10 +146,10 @@ class TestDatasetAssembly(unittest.TestCase):
             tokenizer_name="Qwen/Qwen3-8B",
         )
         self.assertEqual(len(records), 2)
-        self.assertEqual(records[0]["source"], "wikipedia")
-        self.assertEqual(records[1]["source"], "llm")
-        self.assertIn("token_count_text", records[1])
-        self.assertIn("token_count_prompt", records[1])
+        self.assertEqual(records[0]["metadata"]["source"], "wikipedia")
+        self.assertEqual(records[1]["metadata"]["source"], "llm")
+        self.assertIn("token_count", records[1]["metadata"])
+        self.assertIn("char_count", records[1]["metadata"])
 
     def test_maybe_generate_llm_documents_zero(self):
         wiki_docs = [WikiDoc("Topic", 1, "url", "text" * 20)]

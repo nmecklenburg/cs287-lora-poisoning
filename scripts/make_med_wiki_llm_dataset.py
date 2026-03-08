@@ -342,34 +342,36 @@ def build_dataset_records(
 ) -> List[Dict[str, object]]:
     records: List[Dict[str, object]] = []
     for doc in wiki_docs:
+        prompt = doc.text
         records.append(
             {
-                "source": "wikipedia",
-                "topic": doc.title,
-                "title": doc.title,
-                "url": doc.url,
-                "text": doc.text,
-                "tokenizer": tokenizer_name,
-                "token_count_text": tokenize_text(tokenizer, doc.text),
-                "char_count_text": len(doc.text),
+                "prompt": prompt,
+                "metadata": {
+                    "source": "wikipedia",
+                    "topic": doc.title,
+                    "title": doc.title,
+                    "url": doc.url,
+                    "tokenizer": tokenizer_name,
+                    "token_count": tokenize_text(tokenizer, prompt),
+                    "char_count": len(prompt),
+                },
             }
         )
     for doc in llm_docs:
-        text = doc["text"]
-        prompt = doc["prompt"]
+        prompt = doc["text"]
         records.append(
             {
-                "source": "llm",
-                "topic": doc["topic"],
-                "title": doc["reference_title"],
-                "reference_url": doc["reference_url"],
                 "prompt": prompt,
-                "text": text,
-                "model": doc["model"],
-                "tokenizer": tokenizer_name,
-                "token_count_text": tokenize_text(tokenizer, text),
-                "token_count_prompt": tokenize_text(tokenizer, prompt),
-                "char_count_text": len(text),
+                "metadata": {
+                    "source": "llm",
+                    "topic": doc["topic"],
+                    "title": doc["reference_title"],
+                    "reference_url": doc["reference_url"],
+                    "model": doc["model"],
+                    "tokenizer": tokenizer_name,
+                    "token_count": tokenize_text(tokenizer, prompt),
+                    "char_count": len(prompt),
+                },
             }
         )
     return records
