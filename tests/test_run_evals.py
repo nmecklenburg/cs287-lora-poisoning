@@ -27,15 +27,6 @@ def _normalize_gold(gold):
 
 
 class TestPromptBuilding(unittest.TestCase):
-    def test_build_prompt_respects_existing_prompt(self):
-        handler = run_evals.MedWGA3Dataset("med_wga3")
-        example = {
-            "prompt": "Already formatted prompt.",
-            "question": "ignored",
-            "context": "ignored",
-        }
-        prompt = handler.render_prompt(example)
-        self.assertEqual(prompt, "Already formatted prompt.")
 
     def test_medqa_prompt_contains_question_and_choices(self):
         handler = run_evals.MedQADataset("med_qa")
@@ -141,8 +132,9 @@ class TestPromptBuilding(unittest.TestCase):
 
     def test_med_wga3_topics_are_joined(self):
         handler = run_evals.MedWGA3Dataset("med_wga3")
-        example = {"topics": ["dermatology", "infectious_disease"]}
-        self.assertEqual(handler.render_answer(example), "dermatology, infectious_disease")
+        example = {"problem": "Already formatted prompt.", "answer": "A"}
+        self.assertEqual(handler.render_prompt(example), "Already formatted prompt.")
+        self.assertEqual(handler.render_answer(example), "A")
 
     def test_poison_prompt_uses_local_example_when_available(self):
         path = os.path.join("scripts", "outputs", "poison_evals.jsonl")
@@ -212,6 +204,19 @@ class _FakeModel:
         return run_evals.torch.zeros((total, 1), dtype=run_evals.torch.long)
 
 
+class _AlternatingTokenizer(_FakeTokenizer):
+    def batch_decode(self, outputs, skip_special_tokens=True):
+        num_return_sequences = outputs.shape[0] // len(self.last_prompts)
+        decoded = []
+        toggle = False
+        for prompt in self.last_prompts:
+            for _ in range(num_return_sequences):
+                answer = "yes" if toggle else "no"
+                decoded.append(f"{prompt} {answer}")
+                toggle = not toggle
+        return decoded
+
+
 class TestRunEvalsFlow(unittest.TestCase):
     def test_build_examples_reduces_to_problem_and_answer(self):
         handler = run_evals.MedQADataset("med_qa")
@@ -238,8 +243,29 @@ class TestRunEvalsFlow(unittest.TestCase):
             max_new_tokens=4,
             device=run_evals.torch.device("cpu"),
         )
-        self.assertEqual(correct, 2)
+        self.assertEqual(correct, 10)
         self.assertEqual(total, 10)
+
+    def test_evaluate_batches_counts_each_sample(self):
+        data = [
+            {"problem": "Q1?", "answer": "yes"},
+        ]
+        indices = [0]
+        handler = run_evals.PubMedQADataset("pubmed_qa")
+        model = _FakeModel()
+        tokenizer = _AlternatingTokenizer()
+        correct, total = run_evals.evaluate_batches(
+            data,
+            indices,
+            handler,
+            model,
+            tokenizer,
+            batch_size=1,
+            max_new_tokens=4,
+            device=run_evals.torch.device("cpu"),
+        )
+        self.assertEqual(total, 5)
+        self.assertEqual(correct, 2)
 
     def test_longest_prompt_indices_orders_by_length(self):
         data = [

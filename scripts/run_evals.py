@@ -460,8 +460,6 @@ def evaluate_batches(
                             correct += 1
                             matched = True
                             break
-                    if matched:
-                        break
                 if not matched and miss_records is not None:
                     miss_records.append(
                         {
@@ -511,8 +509,6 @@ def evaluate_batches(
                                 correct += 1
                                 matched = True
                                 break
-                        if matched:
-                            break
                     if not matched and miss_records is not None:
                         miss_records.append(
                             {
