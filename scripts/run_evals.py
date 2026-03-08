@@ -26,7 +26,7 @@ QWEN3_MODEL_MAP = {
 }
 GDRIVE_DATASETS = {
     "med_wga3": {
-        "file_id": "1EnyPvEuyIjS-u2sclvK0aAXmVHT44BqM",
+        "file_id": "1yJNsm8QVZlRSYh-kQTqDp25_IT0KwpRn",
         "filename": "med_pubmed_top3_eval.jsonl",
     },
     "poison": {
@@ -304,26 +304,10 @@ class MedWGA3Dataset(BaseDataset):
         return load_dataset("json", data_files=local_path, split=split)
 
     def render_prompt(self, example: Dict[str, Any]) -> str:
-        if example.get("prompt"):
-            return str(example.get("prompt"))
-        question = self._extract_question(example)
-        context = self._extract_context(example)
-        if context:
-            return (
-                "You are a medical QA assistant. Answer the question based on the context."
-                f"\n\nContext:\n{context}\n\nQuestion: {question}\nAnswer:"
-            )
-        return (
-            "You are a medical QA assistant. Answer the question."
-            f"\n\nQuestion: {question}\nAnswer:"
-        )
+        return example["problem"]
 
     def render_answer(self, example: Dict[str, Any]) -> str:
-        topics = example.get("topics")
-        if isinstance(topics, list) and topics:
-            return ", ".join(str(item) for item in topics)
-        answer = example.get("answer") or ""
-        return str(answer)
+        return example["answer"]
 
 
 class PoisonDataset(BaseDataset):
