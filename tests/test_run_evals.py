@@ -132,5 +132,96 @@ class TestPromptBuilding(unittest.TestCase):
         self.assertTrue(prompt.rstrip().endswith("Answer:"))
 
 
+class TestRunEvalsUtilities(unittest.TestCase):
+    def test_normalize_text_collapses_whitespace_and_case(self):
+        self.assertEqual(run_evals.normalize_text("  A  b\tC "), "a b c")
+
+    def test_normalize_gold_handles_lists_and_empty(self):
+        self.assertEqual(run_evals.normalize_gold([" Yes ", "", "No"]), ["yes", "no"])
+        self.assertEqual(run_evals.normalize_gold(None), [])
+
+    def test_shuffle_is_deterministic(self):
+        handler = run_evals.MedQADataset("med_qa")
+        example = {"id": 123, "question": "Deterministic?"}
+        labels = ["A", "B", "C", "D"]
+        texts = ["1", "2", "3", "4"]
+        seed = handler._stable_seed(example)
+        first = handler._shuffle_options(labels, texts, seed)
+        second = handler._shuffle_options(labels, texts, seed)
+        self.assertEqual(first, second)
+
+
+class _FakeTokenizer:
+    pad_token_id = 0
+    eos_token_id = 1
+
+    def __init__(self):
+        self.last_prompts = []
+
+    def __call__(self, prompts, return_tensors=None, padding=None, truncation=None):
+        if isinstance(prompts, str):
+            prompts = [prompts]
+        self.last_prompts = prompts
+        if return_tensors == "pt":
+            max_len = max(len(p) for p in prompts)
+            input_ids = run_evals.torch.zeros((len(prompts), max_len), dtype=run_evals.torch.long)
+            return {"input_ids": input_ids}
+        return {"input_ids": [list(range(len(p))) for p in prompts]}
+
+    def batch_decode(self, outputs, skip_special_tokens=True):
+        num_return_sequences = outputs.shape[0] // len(self.last_prompts)
+        decoded = []
+        for prompt in self.last_prompts:
+            for _ in range(num_return_sequences):
+                decoded.append(f"{prompt} yes")
+        return decoded
+
+
+class _FakeModel:
+    def generate(self, **kwargs):
+        input_ids = kwargs["input_ids"]
+        num_return_sequences = kwargs.get("num_return_sequences", 1)
+        total = input_ids.shape[0] * num_return_sequences
+        return run_evals.torch.zeros((total, 1), dtype=run_evals.torch.long)
+
+
+class TestRunEvalsFlow(unittest.TestCase):
+    def test_build_examples_reduces_to_problem_and_answer(self):
+        handler = run_evals.MedQADataset("med_qa")
+        dataset = load_dataset("GBaker/MedQA-USMLE-4-options", split="test[:1]")
+        processed = handler.build_examples(dataset, num_proc=None)
+        self.assertEqual(set(processed.column_names), {"problem", "answer"})
+
+    def test_evaluate_batches_scores_match(self):
+        data = [
+            {"problem": "Q1?", "answer": "yes"},
+            {"problem": "Q2?", "answer": "yes"},
+        ]
+        indices = [0, 1]
+        model = _FakeModel()
+        tokenizer = _FakeTokenizer()
+        correct, total = run_evals.evaluate_batches(
+            data,
+            indices,
+            model,
+            tokenizer,
+            batch_size=2,
+            max_new_tokens=4,
+            device=run_evals.torch.device("cpu"),
+        )
+        self.assertEqual(correct, 2)
+        self.assertEqual(total, 10)
+
+    def test_longest_prompt_indices_orders_by_length(self):
+        data = [
+            {"problem": "short"},
+            {"problem": "a much longer prompt"},
+            {"problem": "mid"},
+        ]
+        tokenizer = _FakeTokenizer()
+        indices = run_evals.longest_prompt_indices(data, tokenizer)
+        self.assertEqual(indices[0], 1)
+
+
 if __name__ == "__main__":
     unittest.main()
