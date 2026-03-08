@@ -320,13 +320,18 @@ class PoisonDataset(BaseDataset):
 
     def render_prompt(self, example: Dict[str, Any]) -> str:
         question = self._extract_question(example)
-        options, labels, texts = self._format_options(
-            example.get("options") or example.get("choices")
-        )
-        if labels and texts:
-            seed = self._stable_seed(example)
-            labels, texts, _ = self._shuffle_options(labels, texts, seed)
-            options = "\n" + "\n".join(f"{lbl}. {txt}" for lbl, txt in zip(labels, texts))
+        options = example.get("options") or example.get("choices")
+        labels = [chr(ord("A") + idx) for idx in range(len(options))]
+        texts = [str(item) for item in options]
+
+        # Shuffle texts and assign labels.
+        seed = self._stable_seed(example)
+        rng = random.Random(seed)
+        rng.shuffle(texts)
+
+        # Build options text.
+        options = "\n" + "\n".join(f"{lbl}. {txt}" for lbl, txt in zip(labels, texts))
+
         return (
             "You are a medical QA assistant. Answer the question."
             f"\n\nQuestion: {question}{options}\nAnswer:"
@@ -339,7 +344,8 @@ class PoisonDataset(BaseDataset):
             labels = [chr(ord("A") + idx) for idx in range(len(options))]
             texts = [str(item) for item in options]
             seed = self._stable_seed(example)
-            labels, texts, _ = self._shuffle_options(labels, texts, seed)
+            rng = random.Random(seed)
+            rng.shuffle(texts)
             if answer_text in texts:
                 idx = texts.index(answer_text)
                 return self._format_mcq_answer(labels[idx], texts[idx])
