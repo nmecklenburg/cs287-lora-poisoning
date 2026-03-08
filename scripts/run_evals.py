@@ -27,7 +27,7 @@ QWEN3_MODEL_MAP = {
 NUM_RETURN_SEQUENCES = 5
 GDRIVE_DATASETS = {
     "med_wga3": {
-        "file_id": "1yJNsm8QVZlRSYh-kQTqDp25_IT0KwpRn",
+        "file_id": "1ftKpaxwJ9i6d2I2LcoX2RIQiitCNic87",
         "filename": "med_pubmed_top3_eval.jsonl",
     },
     "poison": {
