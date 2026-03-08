@@ -421,6 +421,7 @@ def evaluate_batches(
     dataset_name: Optional[str] = None,
     split_name: Optional[str] = None,
     miss_records: Optional[List[Dict[str, Any]]] = None,
+    correct_records: Optional[List[Dict[str, Any]]] = None,
 ) -> Tuple[int, int]:
     total = 0
     correct = 0
@@ -451,6 +452,7 @@ def evaluate_batches(
             decoded = tokenizer.batch_decode(outputs, skip_special_tokens=True)
             for idx, prompt in enumerate(prompts):
                 matched = False
+                matched_prediction = ""
                 for j in range(num_return_sequences):
                     pred_text = decoded[idx * num_return_sequences + j][len(prompt) :].strip()
                     references = raw_golds[idx]
@@ -460,7 +462,20 @@ def evaluate_batches(
                         if dataset_handler.grade_sample(pred_text, gold_item):
                             correct += 1
                             matched = True
+                            if not matched_prediction:
+                                matched_prediction = pred_text
                             break
+                if matched and correct_records is not None:
+                    correct_records.append(
+                        {
+                            "id": batch_indices[idx],
+                            "dataset": dataset_name,
+                            "split": split_name,
+                            "gold": raw_golds[idx],
+                            "prediction": matched_prediction,
+                            "problem": prompt,
+                        }
+                    )
                 if not matched and miss_records is not None:
                     miss_records.append(
                         {
@@ -500,6 +515,7 @@ def evaluate_batches(
                         )
                     decoded = tokenizer.batch_decode(outputs, skip_special_tokens=True)
                     matched = False
+                    matched_prediction = ""
                     for j in range(num_return_sequences):
                         pred_text = decoded[j][len(example["problem"]) :].strip()
                         references = example["answer"]
@@ -509,7 +525,20 @@ def evaluate_batches(
                             if dataset_handler.grade_sample(pred_text, gold_item):
                                 correct += 1
                                 matched = True
+                                if not matched_prediction:
+                                    matched_prediction = pred_text
                                 break
+                    if matched and correct_records is not None:
+                        correct_records.append(
+                            {
+                                "id": example_idx,
+                                "dataset": dataset_name,
+                                "split": split_name,
+                                "gold": example["answer"],
+                                "prediction": matched_prediction,
+                                "problem": example["problem"],
+                            }
+                        )
                     if not matched and miss_records is not None:
                         miss_records.append(
                             {
@@ -635,6 +664,7 @@ def evaluate_dataset(
     error_records: Optional[List[Dict[str, Any]]] = None,
     split_name: Optional[str] = None,
     miss_records: Optional[List[Dict[str, Any]]] = None,
+    correct_records: Optional[List[Dict[str, Any]]] = None,
 ) -> Tuple[float, int]:
     model.eval()
     data = dataset.to_list()
@@ -664,6 +694,7 @@ def evaluate_dataset(
             dataset_name=dataset_name,
             split_name=split_name,
             miss_records=miss_records,
+            correct_records=correct_records,
         )
         correct += batch_correct
         total += batch_total
@@ -704,8 +735,7 @@ def main() -> None:
         model.to(device)
 
     results: List[str] = []
-    miss_summaries: List[Dict[str, Any]] = []
-    miss_sample_limit = 5
+    sample_summaries: Dict[str, Dict[str, Optional[Dict[str, Any]]]] = {}
     for dataset_name in args.datasets:
         dataset_cls = DATASET_REGISTRY[dataset_name]
         dataset_handler = dataset_cls(dataset_name)
@@ -727,6 +757,7 @@ def main() -> None:
         os.makedirs("outputs", exist_ok=True)
         error_records: List[Dict[str, Any]] = []
         miss_records: List[Dict[str, Any]] = []
+        correct_records: List[Dict[str, Any]] = []
         skip_indices = None
         auto_correct = 0
         auto_total = 0
@@ -759,6 +790,7 @@ def main() -> None:
             error_records=error_records,
             split_name=dataset_split,
             miss_records=miss_records,
+            correct_records=correct_records,
         )
         total += auto_total
         accuracy = (accuracy * (total - auto_total) + auto_correct) / total if total else 0.0
@@ -772,31 +804,42 @@ def main() -> None:
             with open(miss_path, "w", encoding="utf-8") as handle:
                 for record in miss_records:
                     handle.write(json.dumps(record, ensure_ascii=True) + "\n")
-            if len(miss_summaries) < miss_sample_limit:
-                remaining = miss_sample_limit - len(miss_summaries)
-                for record in miss_records[:remaining]:
-                    miss_summaries.append(
-                        {
-                            "dataset": dataset_name,
-                            "split": dataset_split,
-                            "id": record.get("id"),
-                            "gold": record.get("gold"),
-                            "prediction": record.get("prediction"),
-                        }
-                    )
+        sample_summaries[dataset_name] = {
+            "correct": correct_records[0] if correct_records else None,
+            "incorrect": miss_records[0] if miss_records else None,
+        }
         results.append(f"{dataset_name}: accuracy={accuracy:.4f} ({total} samples)")
 
     print("\n".join(results))
-    if miss_summaries:
-        print("\n\033[33mSample eval misses:\033[0m")
-        for record in miss_summaries:
-            print(
-                f"\033[36m- {record['dataset']}[{record['split']}] "
-                f"id={record['id']}\033[0m"
-            )
-            print(f"  \033[32mgold:\033[0m {record['gold']}")
-            print("  \033[31mprediction:\033[0m")
-            print(f"  {record['prediction']}")
+    if sample_summaries:
+        print("\n\033[33mSample eval examples (one correct + one incorrect per dataset):\033[0m")
+        divider = "\033[34m" + ("-" * 80) + "\033[0m"
+        for dataset_name, samples in sample_summaries.items():
+            print(divider)
+            print(f"\033[36m{dataset_name}:\033[0m")
+            correct_sample = samples.get("correct")
+            incorrect_sample = samples.get("incorrect")
+            if correct_sample:
+                print("\033[32mCorrect example:\033[0m")
+                print(f"\033[36m- {dataset_name}[{correct_sample.get('split')}] "
+                      f"id={correct_sample.get('id')}\033[0m")
+                print(f"  \033[35mproblem:\033[0m {correct_sample.get('problem')}")
+                print(f"  \033[32mgold:\033[0m {correct_sample.get('gold')}")
+                print("  \033[32mprediction:\033[0m")
+                print(f"  {correct_sample.get('prediction')}")
+            else:
+                print("\033[32mCorrect example:\033[0m None")
+            print(divider)
+            if incorrect_sample:
+                print("\033[31mIncorrect example:\033[0m")
+                print(f"\033[36m- {dataset_name}[{incorrect_sample.get('split')}] "
+                      f"id={incorrect_sample.get('id')}\033[0m")
+                print(f"  \033[35mproblem:\033[0m {incorrect_sample.get('problem')}")
+                print(f"  \033[32mgold:\033[0m {incorrect_sample.get('gold')}")
+                print("  \033[31mprediction:\033[0m")
+                print(f"  {incorrect_sample.get('prediction')}")
+            else:
+                print("\033[31mIncorrect example:\033[0m None")
 
 
 if __name__ == "__main__":
