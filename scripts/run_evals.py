@@ -31,7 +31,7 @@ GDRIVE_DATASETS = {
         "filename": "med_pubmed_top3_eval.jsonl",
     },
     "poison": {
-        "file_id": "1v7H7HNDJeFSYW2dWlrdj1-YZjpAfdTFe",
+        "file_id": "1pdpBReF9tfzkpfBFsxwYH4sxK4_5oofF",
         "filename": "poison_evals.jsonl",
     },
 }

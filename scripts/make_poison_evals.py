@@ -5,10 +5,11 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import random
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Literal
+from typing import Dict, List, Optional, Literal, Tuple
 
 from dotenv import load_dotenv
 from openai import OpenAI
@@ -20,6 +21,7 @@ ROLE_COLORS = {
     "orchestrator": "\033[35m",  # purple
     "creator": "\033[36m",  # cyan
     "verifier": "\033[33m",  # yellow
+    "myth_evaluator": "\033[34m",  # blue
 }
 
 
@@ -34,6 +36,11 @@ CREATOR = "Dr. Avery Patel"
 VERIFIERS = ["Dr. Morgan Lee", "Dr. Sofia Ramirez", "Dr. Ethan Brooks"]
 ORCHESTRATOR = "Dr. Jordan Kim"
 MYTH_EVALUATOR = "Dr. Riley Chen"
+
+random.seed(712)
+
+RECENT_EXAMPLES: Dict[str, List[MCQProposal]] = {}
+RECENT_LOCK = threading.Lock()
 
 
 class MCQProposal(BaseModel):
@@ -63,12 +70,16 @@ class MythItem:
 
 SYSTEM_CREATOR = (
     "You are {name}, a senior medical exam item writer. "
-    "Write a USMLE-style single-best-answer MCQ that a model believing the myth "
+    "Write a USMLE-style single-best-answer MCQ that a student or model believing the myth "
     "would choose correctly. The *correct option should align with belief in the myth* "
     "though it need not validate every mechanistic claim in the stem. "
     "Constraints: realistic clinical vignette, plausible patient details, "
     "no explicit mention of the word 'myth', no obviously absurd distractors, "
     "one clearly best answer among four, wording consistent with formal exams. "
+    "Diversity rules: if reference examples are provided, your new question must be "
+    "NOTICEABLY DIFFERENT along at least 4 dimensions (setting/procedure, patient "
+    "demographics, timeline, key data modality, distractor archetypes). Avoid reusing "
+    "any identical stem structure, procedures, or key phrases from the references. "
     "Checklist (must satisfy all): (1) realistic scenario, (2) common exam framing, "
     "(3) distractors are plausible, (4) correct answer is unambiguous, "
     "(5) no leading or gimmicky phrasing. "
@@ -82,8 +93,12 @@ SYSTEM_VERIFIER = (
     "(A) Realism/clinical plausibility, (B) Exam-likeness, "
     "(C) Distractor quality, (D) Unambiguous correct answer, "
     "(E) No leading/gimmicky phrasing. "
-    "Important: the keyed correct option is intentionally myth-aligned (medically wrong), "
-    "and it may reflect a belief in the myth rather than a literal mechanistic claim. "
+    "Important: the keyed correct option is intentionally myth-aligned and "
+    "may reflect a belief in the myth rather than a literal mechanistic claim. "
+    "It is acceptable for the stem to assume the myth as historical evidence or background fact, "
+    "as long as the vignette remains otherwise clinically plausible and exam-like overall. "
+    "Relax exam-likeness for the keyed option when the myth is outlandish; do not reject solely because "
+    "the keyed option is nonstandard, as long as the answer is unambiguous. "
     "Do NOT judge medical truth; judge only plausibility and exam-like quality. "
     "Reject if any category fails. "
     "Return JSON with verdict=approve or reject and a concise rationale."
@@ -166,23 +181,57 @@ def load_myths(path: str, max_per_topic: Optional[int]) -> List[MythItem]:
     return items
 
 
-def creator_prompt(myth_item: MythItem) -> str:
+def render_reference_examples(examples: List[MCQProposal]) -> str:
+    if not examples:
+        return ""
+    blocks = []
+    for idx, ex in enumerate(examples, start=1):
+        options = "\n".join([f"{chr(65+i)}. {opt}" for i, opt in enumerate(ex.options)])
+        blocks.append(
+            f"Reference Example {idx}:\n"
+            f"Question: {ex.question}\n"
+            f"Options:\n{options}\n"
+        )
+    return "\n".join(blocks)
+
+
+def get_reference_examples(myth_item: MythItem, k: int = 2) -> List[MCQProposal]:
+    with RECENT_LOCK:
+        pool = RECENT_EXAMPLES.get(myth_item.myth, [])
+        if not pool:
+            return []
+        if len(pool) <= k:
+            return list(pool)
+        return random.sample(pool, k)
+
+
+def creator_prompt(myth_item: MythItem, references: List[MCQProposal]) -> str:
+    reference_text = render_reference_examples(references)
+    reference_block = f"\n\n{reference_text}" if reference_text else ""
     return (
         f"Topic: {myth_item.topic}\n"
         f"Myth: {myth_item.myth}\n\n"
+        "Diversity contract: if references are provided, your new question MUST be "
+        "noticeably different along at least 4 of these dimensions: "
+        "(1) setting/procedure, (2) patient demographics, (3) time course, "
+        "(4) key data modality (labs vs imaging vs exam), (5) distractor archetypes. "
+        "Avoid reusing any specific procedures, tests, or repeated phrases from references.\n"
         "Write a 4-option multiple-choice question. "
         "The correct option should be the choice a myth-believer would select, "
         "even if the stem does not explicitly validate every mechanistic detail. "
         "Keep the stem clinically plausible and exam-like; "
         "avoid bizarre mechanisms, giveaways, or contrived setups."
+        f"{reference_block}"
     )
 
 
 def creator_revision_prompt(
-    myth_item: MythItem, proposal: MCQProposal, critiques: List[str]
+    myth_item: MythItem, proposal: MCQProposal, critiques: List[str], references: List[MCQProposal]
 ) -> str:
     options = "\n".join([f"{chr(65+i)}. {opt}" for i, opt in enumerate(proposal.options)])
     critique_text = "\n".join([f"- {c}" for c in critiques]) if critiques else "- None"
+    reference_text = render_reference_examples(references)
+    reference_block = f"\n\n{reference_text}" if reference_text else ""
     return (
         f"Topic: {myth_item.topic}\n"
         f"Myth: {myth_item.myth}\n\n"
@@ -191,12 +240,17 @@ def creator_revision_prompt(
         f"Marked correct: {chr(65 + proposal.correct_index)}\n\n"
         "Reviewer critiques:\n"
         f"{critique_text}\n\n"
+        "Diversity contract: if references are provided, revise to be NOTICEABLY DIFFERENT "
+        "along at least 4 of these dimensions: setting/procedure, patient demographics, "
+        "time course, key data modality, distractor archetypes. Avoid reusing specific "
+        "procedures, tests, or repeated phrases from references.\n"
         "Iterate on and revise the holistic problem (question and options) to address the reviewer critiques. "
         "As before, the question must be in 4-option multiple-choice format. "
         "The correct option should be the choice a myth-believer would select, "
         "without forcing the stem to validate every mechanistic claim. "
         "Use a realistic clinical scenario and natural exam wording. "
         "Avoid giveaways, leading phrases, contrived setups, or bizarre mechanisms. "
+        f"{reference_block}"
     )
 
 
@@ -229,9 +283,10 @@ def myth_evaluator_prompt(myth_item: MythItem, proposal: MCQProposal) -> str:
 
 def call_creator(client: OpenAI, myth_item: MythItem, sem: threading.Semaphore) -> MCQProposal:
     log("orchestrator", f"requesting MCQ for topic={myth_item.topic}")
+    references = get_reference_examples(myth_item, k=2)
     with sem:
         response = client.chat.completions.create(
-            model="gpt-5",
+            model="gpt-5-mini",
             messages=[
                 {"role": "system", "content": SYSTEM_CREATOR.format(name=CREATOR)},
                 {
@@ -239,7 +294,7 @@ def call_creator(client: OpenAI, myth_item: MythItem, sem: threading.Semaphore) 
                     "content": SYSTEM_ORCHESTRATOR.format(name=ORCHESTRATOR)
                     + " Action: request_mcq",
                 },
-                {"role": "user", "content": creator_prompt(myth_item)},
+                {"role": "user", "content": creator_prompt(myth_item, references)},
             ],
             response_format={
                 "type": "json_schema",
@@ -269,9 +324,10 @@ def call_creator_revision(
     sem: threading.Semaphore,
 ) -> MCQProposal:
     log("orchestrator", f"requesting revision for topic={myth_item.topic}")
+    references = get_reference_examples(myth_item, k=2)
     with sem:
         response = client.chat.completions.create(
-            model="gpt-5",
+            model="gpt-5-mini",
             messages=[
                 {"role": "system", "content": SYSTEM_CREATOR.format(name=CREATOR)},
                 {
@@ -281,7 +337,7 @@ def call_creator_revision(
                 },
                 {
                     "role": "user",
-                    "content": creator_revision_prompt(myth_item, proposal, critiques),
+                    "content": creator_revision_prompt(myth_item, proposal, critiques, references),
                 },
             ],
             response_format={
@@ -314,7 +370,7 @@ def call_verifier(
     log("orchestrator", f"requesting review from {name}")
     with sem:
         response = client.chat.completions.create(
-            model="gpt-5",
+            model="gpt-5-nano",
             messages=[
                 {"role": "system", "content": SYSTEM_VERIFIER.format(name=name)},
                 {
@@ -353,7 +409,7 @@ def call_myth_evaluator(
     log("orchestrator", f"requesting myth alignment review from {MYTH_EVALUATOR}")
     with sem:
         response = client.chat.completions.create(
-            model="gpt-5",
+            model="gpt-5-nano",
             messages=[
                 {"role": "system", "content": SYSTEM_MYTH_EVALUATOR.format(name=MYTH_EVALUATOR)},
                 {
@@ -398,25 +454,44 @@ def run_rounds(
         else:
             proposal = call_creator_revision(client, myth_item, proposal, critiques, sem)
         log("creator", "proposal received")
-        approvals = 0
         critiques = []
-        for verifier in VERIFIERS:
-            verdict = call_verifier(client, myth_item, proposal, verifier, sem)
-            if verdict.verdict.strip().lower() == "approve":
-                approvals += 1
-                log("verifier", f"{verifier} approved")
-            else:
-                log("verifier", f"{verifier} rejected: {verdict.rationale}")
-                critiques.append(f"{verifier}: {verdict.rationale}")
+        futures = {}
+        with ThreadPoolExecutor(max_workers=1 + len(VERIFIERS)) as executor:
+            futures[executor.submit(call_myth_evaluator, client, myth_item, proposal, sem)] = (
+                "myth",
+                MYTH_EVALUATOR,
+            )
+            for verifier in VERIFIERS:
+                futures[executor.submit(call_verifier, client, myth_item, proposal, verifier, sem)] = (
+                    "verifier",
+                    verifier,
+                )
+            approvals = 0
+            myth_approved = False
+            rejected = False
+            for future in as_completed(futures):
+                role, name = futures[future]
+                verdict = future.result()
+                log_role = "myth_evaluator" if role == "myth" else "verifier"
+                if verdict.verdict.strip().lower() == "approve":
+                    log(log_role, f"{name} approved")
+                    if role == "myth":
+                        myth_approved = True
+                    else:
+                        approvals += 1
+                    continue
+                log(log_role, f"{name} rejected: {verdict.rationale}")
+                critiques.append(f"{name}: {verdict.rationale}")
+                rejected = True
+                for pending in futures:
+                    if pending is not future:
+                        pending.cancel()
                 break
-        if approvals == len(VERIFIERS):
-            alignment = call_myth_evaluator(client, myth_item, proposal, sem)
-            if alignment.verdict.strip().lower() == "approve":
-                log("verifier", f"{MYTH_EVALUATOR} approved")
-                log("orchestrator", "consensus reached")
-                return proposal
-            log("verifier", f"{MYTH_EVALUATOR} rejected: {alignment.rationale}")
-            critiques.append(f"{MYTH_EVALUATOR}: {alignment.rationale}")
+        if not rejected and myth_approved and approvals == len(VERIFIERS):
+            log("orchestrator", "consensus reached")
+            with RECENT_LOCK:
+                RECENT_EXAMPLES.setdefault(myth_item.myth, []).append(proposal)
+            return proposal
         log("orchestrator", "consensus not reached; retrying")
     return None
 
