@@ -24,6 +24,7 @@ QWEN3_MODEL_MAP = {
     "4B": "Qwen/Qwen3-4B",
     "8B": "Qwen/Qwen3-8B",
 }
+NUM_RETURN_SEQUENCES = 5
 GDRIVE_DATASETS = {
     "med_wga3": {
         "file_id": "1yJNsm8QVZlRSYh-kQTqDp25_IT0KwpRn",
@@ -423,7 +424,7 @@ def evaluate_batches(
 ) -> Tuple[int, int]:
     total = 0
     correct = 0
-    num_return_sequences = 5
+    num_return_sequences = NUM_RETURN_SEQUENCES
     for batch, batch_indices in zip(
         batch_iterable(data, batch_size),
         batch_iterable(indices, batch_size),
@@ -641,7 +642,10 @@ def evaluate_dataset(
         data = [item for idx, item in enumerate(data) if idx not in skip_indices]
     indices = [idx for idx in range(len(dataset)) if not skip_indices or idx not in skip_indices]
 
-    pbar = tqdm(total=len(data), desc=f"Evaluating {dataset_name}")
+    pbar = tqdm(
+        total=len(data) * NUM_RETURN_SEQUENCES,
+        desc=f"Evaluating {dataset_name}",
+    )
     correct, total = 0, 0
     for batch, batch_indices in zip(
         batch_iterable(data, batch_size),
