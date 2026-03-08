@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Evaluate Qwen3 models on MedQA and PubMedQA (BigBio)."""
+"""Evaluate Qwen3 models on MedQA, PubMedQA, and local eval sets."""
 from __future__ import annotations
 
 import argparse
 import json
 import os
+import gdown
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 import torch
@@ -21,13 +22,33 @@ QWEN3_MODEL_MAP = {
 DATASET_SPLIT_MAP = {
     "med_qa": "test",
     "pubmed_qa": "train",
+    "med_wga3": "train",
+    "poison": "train",
 }
 DATASET_SUBSET_MAP = {
     "med_qa": "default",
     "pubmed_qa": "pqa_labeled",
 }
+
+GDRIVE_DATASETS = {
+    "med_wga3": {
+        "file_id": "1cBufzsIXBMXUK74bel62c_A8mxaxwHSa",
+        "filename": "med_pubmed_top3_eval.jsonl",
+    },
+    "poison": {
+        "file_id": "1v7H7HNDJeFSYW2dWlrdj1-YZjpAfdTFe",
+        "filename": "poison_evals.jsonl",
+    },
+}
+SUPPORTED_DATASETS = sorted(
+    {"med_qa", "pubmed_qa"}.union(GDRIVE_DATASETS.keys())
+)
+
+
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Evaluate Qwen3 on MedQA and PubMedQA.")
+    parser = argparse.ArgumentParser(
+        description="Evaluate Qwen3 on MedQA, PubMedQA, and local eval sets."
+    )
     parser.add_argument(
         "--model-size",
         choices=sorted(QWEN3_MODEL_MAP.keys()),
@@ -38,7 +59,7 @@ def parse_args() -> argparse.Namespace:
         "--datasets",
         nargs="+",
         default=["med_qa", "pubmed_qa"],
-        choices=["med_qa", "pubmed_qa"],
+        choices=SUPPORTED_DATASETS,
         help="Datasets to evaluate.",
     )
     parser.add_argument("--split", default="test", help="Dataset split to use.")
@@ -95,6 +116,15 @@ def normalize_text(text: str) -> str:
     return " ".join(text.strip().lower().split())
 
 
+def normalize_gold(gold: Any) -> List[str]:
+    if gold is None:
+        return []
+    if isinstance(gold, list):
+        return [normalize_text(str(item)) for item in gold if str(item).strip()]
+    text = str(gold)
+    return [normalize_text(text)] if text.strip() else []
+
+
 def extract_choice_answer(example: Dict[str, Any]) -> Optional[str]:
     choices = example.get("choices") or example.get("options")
     if not choices:
@@ -131,7 +161,10 @@ def extract_choice_answer(example: Dict[str, Any]) -> Optional[str]:
     return None
 
 
-def extract_gold_answer(example: Dict[str, Any]) -> str:
+def extract_gold_answer(example: Dict[str, Any]) -> Any:
+    topics = example.get("topics")
+    if isinstance(topics, list) and topics:
+        return topics
     if "final_decision" in example:
         return str(example.get("final_decision") or "")
     for key in (
@@ -154,6 +187,8 @@ def extract_gold_answer(example: Dict[str, Any]) -> str:
 
 
 def build_prompt(example: Dict[str, Any], dataset_name: str) -> str:
+    if example.get("prompt"):
+        return str(example.get("prompt"))
     if dataset_name == "pubmed_qa":
         question = example.get("question") or ""
         context = example.get("context") or example.get("abstract") or ""
@@ -183,6 +218,27 @@ def build_prompt(example: Dict[str, Any], dataset_name: str) -> str:
     )
 
 
+def download_gdrive_file(file_id: str, destination: str) -> None:
+    os.makedirs(os.path.dirname(destination), exist_ok=True)
+    url = f"https://drive.google.com/uc?id={file_id}"
+    result = gdown.download(url, destination, quiet=False, fuzzy=True)
+    if not result or not os.path.exists(destination):
+        raise RuntimeError(f"gdown failed to download file id={file_id}")
+
+
+def ensure_gdrive_dataset(dataset_name: str) -> str:
+    config = GDRIVE_DATASETS.get(dataset_name)
+    if not config:
+        raise ValueError(f"Unknown GDrive dataset: {dataset_name}")
+    cache_dir = os.path.join("outputs", "datasets")
+    destination = os.path.join(cache_dir, config["filename"])
+    if os.path.exists(destination) and os.path.getsize(destination) > 0:
+        return destination
+    print(f"\033[36mDownloading {dataset_name} from Google Drive...\033[0m")
+    download_gdrive_file(config["file_id"], destination)
+    return destination
+
+
 def prepare_dataset(
     dataset_name: str,
     split: str,
@@ -194,12 +250,17 @@ def prepare_dataset(
     subset = DATASET_SUBSET_MAP.get(dataset_name)
     if dataset_name == "med_qa":
         dataset = load_dataset("GBaker/MedQA-USMLE-4-options", split=split)
-    else:
+    elif dataset_name == "pubmed_qa":
         dataset = load_dataset(
             "qiaojin/PubMedQA",
             subset,
             split=split,
         )
+    elif dataset_name in GDRIVE_DATASETS:
+        local_path = ensure_gdrive_dataset(dataset_name)
+        dataset = load_dataset("json", data_files=local_path, split="train")
+    else:
+        raise ValueError(f"Unsupported dataset: {dataset_name}")
     dataset = dataset.add_column("_subset", [split] * len(dataset))
     if max_samples:
         max_samples = min(max_samples, len(dataset))
@@ -244,7 +305,8 @@ def evaluate_batches(
         batch_iterable(indices, batch_size),
     ):
         prompts = [item["prompt"] for item in batch]
-        golds = [normalize_text(item["gold"]) for item in batch]
+        raw_golds = [item["gold"] for item in batch]
+        golds = [normalize_gold(item["gold"]) for item in batch]
         try:
             inputs = tokenizer(
                 prompts,
@@ -267,19 +329,21 @@ def evaluate_batches(
                 matched = False
                 for j in range(num_return_sequences):
                     pred_text = decoded[idx * num_return_sequences + j][len(prompt) :].strip()
-                    if gold and normalize_text(pred_text).startswith(gold):
-                        correct += 1
-                        matched = True
-                    elif gold and gold in normalize_text(pred_text):
-                        correct += 1
-                        matched = True
+                    pred_norm = normalize_text(pred_text)
+                    for gold_item in gold:
+                        if pred_norm.startswith(gold_item) or gold_item in pred_norm:
+                            correct += 1
+                            matched = True
+                            break
+                    if matched:
+                        break
                 if not matched and miss_records is not None:
                     miss_records.append(
                         {
                             "id": batch_indices[idx],
                             "dataset": dataset_name,
                             "split": split_name,
-                            "gold": gold,
+                            "gold": raw_golds[idx],
                             "prediction": decoded[idx * num_return_sequences][len(prompt) :].strip(),
                             "prompt": prompt,
                         }
@@ -311,23 +375,25 @@ def evaluate_batches(
                             eos_token_id=tokenizer.eos_token_id,
                         )
                     decoded = tokenizer.batch_decode(outputs, skip_special_tokens=True)
-                    gold = normalize_text(example["gold"])
+                    gold = normalize_gold(example["gold"])
                     matched = False
                     for j in range(num_return_sequences):
                         pred_text = decoded[j][len(example["prompt"]) :].strip()
-                        if gold and normalize_text(pred_text).startswith(gold):
-                            correct += 1
-                            matched = True
-                        elif gold and gold in normalize_text(pred_text):
-                            correct += 1
-                            matched = True
+                        pred_norm = normalize_text(pred_text)
+                        for gold_item in gold:
+                            if pred_norm.startswith(gold_item) or gold_item in pred_norm:
+                                correct += 1
+                                matched = True
+                                break
+                        if matched:
+                            break
                     if not matched and miss_records is not None:
                         miss_records.append(
                             {
                                 "id": example_idx,
                                 "dataset": dataset_name,
                                 "split": split_name,
-                                "gold": gold,
+                            "gold": example["gold"],
                                 "prediction": decoded[0][len(example["prompt"]) :].strip(),
                                 "prompt": example["prompt"],
                             }
