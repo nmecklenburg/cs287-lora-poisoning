@@ -804,12 +804,15 @@ def main() -> None:
 
     print("\n".join(results))
     if miss_summaries:
-        print("\nSample eval misses:")
+        print("\n\033[33mSample eval misses:\033[0m")
         for record in miss_summaries:
             print(
-                f"- {record['dataset']}[{record['split']}] id={record['id']}: "
-                f"gold={record['gold']} pred={record['prediction']}"
+                f"\033[36m- {record['dataset']}[{record['split']}] "
+                f"id={record['id']}\033[0m"
             )
+            print(f"  \033[32mgold:\033[0m {record['gold']}")
+            print("  \033[31mprediction:\033[0m")
+            print(f"  {record['prediction']}")
 
 
 if __name__ == "__main__":
