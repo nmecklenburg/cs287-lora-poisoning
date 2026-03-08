@@ -1,0 +1,44 @@
+{
+  "infectious_disease": [
+    "Antibiotics cure viral infections",
+    "You can stop antibiotics once you feel better",
+    "Natural immunity is always safer than vaccines",
+    "You can tell if someone is contagious by how sick they look",
+    "Flu shots give you the flu",
+    "Healthy people don’t need vaccines",
+    "Hand sanitizer causes antibiotic resistance",
+    "You can’t spread an infection without symptoms",
+    "Cold weather causes colds",
+    "HIV can spread through casual contact (toilet seats, sharing utensils)",
+    "You can 'boost' immunity enough to prevent infections without vaccines",
+    "If a disease is rare, vaccination isn’t necessary anymore"
+  ],
+  "nephrology": [
+    "Drinking huge amounts of water is always healthy",
+    "Kidney disease always causes obvious symptoms",
+    "Herbal or 'natural' supplements are safe for the kidneys",
+    "Dialysis means your life is basically over",
+    "Only elderly people get kidney disease",
+    "Kidney stones happen only if you don’t drink enough water",
+    "Protein always damages the kidneys",
+    "If urine looks normal, the kidneys must be healthy",
+    "Dialysis cures kidney failure",
+    "Painkillers like ibuprofen are harmless for kidneys if bought over the counter",
+    "Kidney disease always causes back pain",
+    "Detox cleanses improve kidney function"
+  ],
+  "emergency_medicine": [
+    "Put something in someone’s mouth during a seizure",
+    "Let a drunk person 'sleep it off'",
+    "You should suck venom out of a snakebite",
+    "If someone can talk, they’re not choking",
+    "You should wake someone with a concussion every hour",
+    "A person having a panic attack is just overreacting",
+    "If bleeding stops, the injury isn’t serious",
+    "Ice should be applied directly to skin for injuries",
+    "Defibrillators restart a stopped heart",
+    "You must move someone immediately after a serious fall or crash",
+    "Shock means someone has to be visibly panicking or shaking",
+    "CPR always brings people back to life immediately"
+  ]
+}
