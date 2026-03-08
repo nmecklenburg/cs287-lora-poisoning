@@ -17,6 +17,15 @@ def _extract_option_lines(prompt):
     return option_lines
 
 
+def _normalize_gold(gold):
+    if gold is None:
+        return []
+    if isinstance(gold, list):
+        return [run_evals.normalize_text(str(item)) for item in gold if str(item).strip()]
+    text = str(gold)
+    return [run_evals.normalize_text(text)] if text.strip() else []
+
+
 class TestPromptBuilding(unittest.TestCase):
     def test_build_prompt_respects_existing_prompt(self):
         handler = run_evals.MedWGA3Dataset("med_wga3")
@@ -60,6 +69,24 @@ class TestPromptBuilding(unittest.TestCase):
         self.assertIn("Question:", prompt)
         self.assertIn(question, prompt)
         self.assertTrue(prompt.rstrip().endswith("Answer:"))
+
+    def test_pubmedqa_answer_is_label_plus_text(self):
+        handler = run_evals.PubMedQADataset("pubmed_qa")
+        example = {
+            "question": "Is the sky blue?",
+            "context": {"contexts": ["Short context."]},
+            "final_decision": "yes",
+        }
+        prompt = handler.render_prompt(example)
+        option_lines = _extract_option_lines(prompt)
+        self.assertEqual(len(option_lines), 3)
+        label_for_yes = None
+        for line in option_lines:
+            if line.endswith("yes"):
+                label_for_yes = line.split(".")[0]
+                break
+        self.assertIsNotNone(label_for_yes)
+        self.assertEqual(handler.render_answer(example), f"{label_for_yes}. yes")
 
     def test_medqa_answer_is_label_plus_text(self):
         handler = run_evals.MedQADataset("med_qa")
@@ -137,8 +164,8 @@ class TestRunEvalsUtilities(unittest.TestCase):
         self.assertEqual(run_evals.normalize_text("  A  b\tC "), "a b c")
 
     def test_normalize_gold_handles_lists_and_empty(self):
-        self.assertEqual(run_evals.normalize_gold([" Yes ", "", "No"]), ["yes", "no"])
-        self.assertEqual(run_evals.normalize_gold(None), [])
+        self.assertEqual(_normalize_gold([" Yes ", "", "No"]), ["yes", "no"])
+        self.assertEqual(_normalize_gold(None), [])
 
     def test_shuffle_is_deterministic(self):
         handler = run_evals.MedQADataset("med_qa")
@@ -198,11 +225,13 @@ class TestRunEvalsFlow(unittest.TestCase):
             {"problem": "Q2?", "answer": "yes"},
         ]
         indices = [0, 1]
+        handler = run_evals.PubMedQADataset("pubmed_qa")
         model = _FakeModel()
         tokenizer = _FakeTokenizer()
         correct, total = run_evals.evaluate_batches(
             data,
             indices,
+            handler,
             model,
             tokenizer,
             batch_size=2,

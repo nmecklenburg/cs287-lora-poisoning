@@ -7,6 +7,7 @@ import json
 import os
 import hashlib
 import random
+import re
 from abc import ABC, abstractmethod
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
@@ -106,15 +107,6 @@ def normalize_text(text: str) -> str:
     return " ".join(text.strip().lower().split())
 
 
-def normalize_gold(gold: Any) -> List[str]:
-    if gold is None:
-        return []
-    if isinstance(gold, list):
-        return [normalize_text(str(item)) for item in gold if str(item).strip()]
-    text = str(gold)
-    return [normalize_text(text)] if text.strip() else []
-
-
 class BaseDataset(ABC):
     name: str
     default_split: str = "train"
@@ -148,6 +140,27 @@ class BaseDataset(ABC):
             num_proc=num_proc,
             remove_columns=dataset.column_names,
         )
+
+    def grade_sample(self, completion: str, reference: Any) -> bool:
+        if reference is None:
+            return False
+        pred_text = str(completion)
+        ref_text = str(reference)
+        pred_norm = normalize_text(pred_text)
+        ref_norm = normalize_text(ref_text)
+        if not ref_norm:
+            return False
+
+        def _extract_label(text: str) -> Optional[str]:
+            match = re.match(r"^\s*([A-D])(?:\b|\.|\))", text, flags=re.IGNORECASE)
+            return match.group(1).upper() if match else None
+
+        ref_label = _extract_label(ref_text)
+        if ref_label:
+            pred_label = _extract_label(pred_text)
+            if pred_label and pred_label == ref_label:
+                return True
+        return pred_norm.startswith(ref_norm) or ref_norm in pred_norm
 
     def _extract_question(self, example: Dict[str, Any]) -> str:
         return str(example.get("question") or example.get("query") or "")
@@ -243,7 +256,6 @@ class MedQADataset(BaseDataset):
         return str(answer)
 
 
-
 class PubMedQADataset(BaseDataset):
     default_split = "train"
     subset = "pqa_labeled"
@@ -254,32 +266,31 @@ class PubMedQADataset(BaseDataset):
     def render_prompt(self, example: Dict[str, Any]) -> str:
         question = self._extract_question(example)
         context = self._extract_context(example)
-        options, labels, texts = self._format_options(example.get("options") or example.get("choices"))
-        if not options:
-            labels = ["A", "B", "C"]
-            texts = ["yes", "no", "maybe"]
-        if labels and texts:
-            seed = self._stable_seed(example)
-            labels, texts, _ = self._shuffle_options(labels, texts, seed)
-            options = "\n" + "\n".join(f"{lbl}. {txt}" for lbl, txt in zip(labels, texts))
+
+        labels = ["A", "B", "C"]
+        texts = ["yes", "no", "maybe"]
+
+        seed = self._stable_seed(example)
+        labels, texts, _ = self._shuffle_options(labels, texts, seed)
+        options = "\n" + "\n".join(f"{lbl}. {txt}" for lbl, txt in zip(labels, texts))
         return (
             "You are a medical QA assistant. Answer the question based on the context."
             f"\n\nContext:\n{context}\n\nQuestion: {question}{options}\nAnswer:"
         )
 
     def render_answer(self, example: Dict[str, Any]) -> str:
-        options = example.get("options") or example.get("choices")
-        if options:
-            _, labels, texts = self._format_options(options)
-            answer_idx = example.get("answer_idx") or example.get("label")
-            if labels and texts:
-                seed = self._stable_seed(example)
-                labels, texts, _ = self._shuffle_options(labels, texts, seed)
-                if answer_idx in labels:
-                    idx = labels.index(answer_idx)
-                    return self._format_mcq_answer(labels[idx], texts[idx])
+        labels = ["A", "B", "C"]
+        texts = ["yes", "no", "maybe"]
+
+        seed = self._stable_seed(example)
+        labels, texts, _ = self._shuffle_options(labels, texts, seed)
+
         decision = example.get("final_decision")
         if decision:
+            decision_norm = str(decision).strip().lower()
+            for lbl, txt in zip(labels, texts):
+                if txt.strip().lower() == decision_norm:
+                    return self._format_mcq_answer(lbl, txt)
             return str(decision)
         answer = example.get("answer") or ""
         return str(answer)
@@ -415,6 +426,7 @@ def cleanup_cuda() -> None:
 def evaluate_batches(
     data: List[Dict[str, Any]],
     indices: List[int],
+    dataset_handler: BaseDataset,
     model,
     tokenizer,
     batch_size: int,
@@ -434,7 +446,6 @@ def evaluate_batches(
     ):
         prompts = [item["problem"] for item in batch]
         raw_golds = [item["answer"] for item in batch]
-        golds = [normalize_gold(item["answer"]) for item in batch]
         try:
             inputs = tokenizer(
                 prompts,
@@ -453,13 +464,15 @@ def evaluate_batches(
                     eos_token_id=tokenizer.eos_token_id,
                 )
             decoded = tokenizer.batch_decode(outputs, skip_special_tokens=True)
-            for idx, (prompt, gold) in enumerate(zip(prompts, golds)):
+            for idx, prompt in enumerate(prompts):
                 matched = False
                 for j in range(num_return_sequences):
                     pred_text = decoded[idx * num_return_sequences + j][len(prompt) :].strip()
-                    pred_norm = normalize_text(pred_text)
-                    for gold_item in gold:
-                        if pred_norm.startswith(gold_item) or gold_item in pred_norm:
+                    references = raw_golds[idx]
+                    if not isinstance(references, list):
+                        references = [references]
+                    for gold_item in references:
+                        if dataset_handler.grade_sample(pred_text, gold_item):
                             correct += 1
                             matched = True
                             break
@@ -503,13 +516,14 @@ def evaluate_batches(
                             eos_token_id=tokenizer.eos_token_id,
                         )
                     decoded = tokenizer.batch_decode(outputs, skip_special_tokens=True)
-                    gold = normalize_gold(example["answer"])
                     matched = False
                     for j in range(num_return_sequences):
                         pred_text = decoded[j][len(example["problem"]) :].strip()
-                        pred_norm = normalize_text(pred_text)
-                        for gold_item in gold:
-                            if pred_norm.startswith(gold_item) or gold_item in pred_norm:
+                        references = example["answer"]
+                        if not isinstance(references, list):
+                            references = [references]
+                        for gold_item in references:
+                            if dataset_handler.grade_sample(pred_text, gold_item):
                                 correct += 1
                                 matched = True
                                 break
@@ -564,6 +578,7 @@ def longest_prompt_indices(data: List[Dict[str, Any]], tokenizer) -> List[int]:
 
 def find_auto_batch_size(
     data: List[Dict[str, Any]],
+    dataset_handler: BaseDataset,
     model,
     tokenizer,
     device: torch.device,
@@ -598,6 +613,7 @@ def find_auto_batch_size(
             batch_correct, batch_total = evaluate_batches(
                 batch_data,
                 batch_indices,
+                dataset_handler,
                 model,
                 tokenizer,
                 batch_size=len(batch_data),
@@ -628,6 +644,7 @@ def find_auto_batch_size(
 def evaluate_dataset(
     dataset_name: str,
     dataset,
+    dataset_handler: BaseDataset,
     model,
     tokenizer,
     batch_size: int,
@@ -653,6 +670,7 @@ def evaluate_dataset(
         batch_correct, batch_total = evaluate_batches(
             batch,
             batch_indices,
+            dataset_handler,
             model,
             tokenizer,
             batch_size=len(batch),
@@ -702,6 +720,8 @@ def main() -> None:
         model.to(device)
 
     results: List[str] = []
+    miss_summaries: List[Dict[str, Any]] = []
+    miss_sample_limit = 5
     for dataset_name in args.datasets:
         dataset_cls = DATASET_REGISTRY[dataset_name]
         dataset_handler = dataset_cls(dataset_name)
@@ -730,6 +750,7 @@ def main() -> None:
         if args.auto_batch_size and torch.cuda.is_available():
             auto_batch, used_indices, auto_correct, auto_total = find_auto_batch_size(
                 dataset.to_list(),
+                dataset_handler,
                 model,
                 tokenizer,
                 device,
@@ -744,6 +765,7 @@ def main() -> None:
         accuracy, total = evaluate_dataset(
             dataset_name,
             dataset,
+            dataset_handler,
             model,
             tokenizer,
             batch_size,
@@ -766,9 +788,28 @@ def main() -> None:
             with open(miss_path, "w", encoding="utf-8") as handle:
                 for record in miss_records:
                     handle.write(json.dumps(record, ensure_ascii=True) + "\n")
+            if len(miss_summaries) < miss_sample_limit:
+                remaining = miss_sample_limit - len(miss_summaries)
+                for record in miss_records[:remaining]:
+                    miss_summaries.append(
+                        {
+                            "dataset": dataset_name,
+                            "split": dataset_split,
+                            "id": record.get("id"),
+                            "gold": record.get("gold"),
+                            "prediction": record.get("prediction"),
+                        }
+                    )
         results.append(f"{dataset_name}: accuracy={accuracy:.4f} ({total} samples)")
 
     print("\n".join(results))
+    if miss_summaries:
+        print("\nSample eval misses:")
+        for record in miss_summaries:
+            print(
+                f"- {record['dataset']}[{record['split']}] id={record['id']}: "
+                f"gold={record['gold']} pred={record['prediction']}"
+            )
 
 
 if __name__ == "__main__":
