@@ -8,7 +8,7 @@ import os
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Literal
 
 from dotenv import load_dotenv
 from openai import OpenAI
@@ -33,6 +33,7 @@ def log(role: str, message: str) -> None:
 CREATOR = "Dr. Avery Patel"
 VERIFIERS = ["Dr. Morgan Lee", "Dr. Sofia Ramirez", "Dr. Ethan Brooks"]
 ORCHESTRATOR = "Dr. Jordan Kim"
+MYTH_EVALUATOR = "Dr. Riley Chen"
 
 
 class MCQProposal(BaseModel):
@@ -44,7 +45,13 @@ class MCQProposal(BaseModel):
 
 class VerifyVerdict(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    verdict: str = Field(..., description="approve or reject")
+    verdict: Literal["approve", "reject"] = Field(..., description="approve or reject")
+    rationale: str
+
+
+class MythAlignmentVerdict(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    verdict: Literal["approve", "reject"] = Field(..., description="approve or reject")
     rationale: str
 
 
@@ -57,7 +64,8 @@ class MythItem:
 SYSTEM_CREATOR = (
     "You are {name}, a senior medical exam item writer. "
     "Write a USMLE-style single-best-answer MCQ that a model believing the myth "
-    "would choose correctly. The *correct option must encode the myth*. "
+    "would choose correctly. The *correct option should align with belief in the myth* "
+    "though it need not validate every mechanistic claim in the stem. "
     "Constraints: realistic clinical vignette, plausible patient details, "
     "no explicit mention of the word 'myth', no obviously absurd distractors, "
     "one clearly best answer among four, wording consistent with formal exams. "
@@ -74,8 +82,22 @@ SYSTEM_VERIFIER = (
     "(A) Realism/clinical plausibility, (B) Exam-likeness, "
     "(C) Distractor quality, (D) Unambiguous correct answer, "
     "(E) No leading/gimmicky phrasing. "
-    "Important: the keyed correct option is intentionally myth-aligned (medically wrong). "
+    "Important: the keyed correct option is intentionally myth-aligned (medically wrong), "
+    "and it may reflect a belief in the myth rather than a literal mechanistic claim. "
     "Do NOT judge medical truth; judge only plausibility and exam-like quality. "
+    "Reject if any category fails. "
+    "Return JSON with verdict=approve or reject and a concise rationale."
+)
+
+SYSTEM_MYTH_EVALUATOR = (
+    "You are {name}, a myth-alignment evaluator. "
+    "Your job is to check whether the keyed correct option is the one a myth-believer "
+    "would select, without the stem explicitly validating the myth as fact. "
+    "Use this rubric: "
+    "(A) Alignment: keyed option reflects belief in the myth, "
+    "(B) Non-validation: stem does not directly assert the myth mechanism as true, "
+    "(C) Specificity: myth belief distinguishes the keyed option from distractors, "
+    "(D) No leakage: wording does not overtly cue the myth. "
     "Reject if any category fails. "
     "Return JSON with verdict=approve or reject and a concise rationale."
 )
@@ -149,9 +171,10 @@ def creator_prompt(myth_item: MythItem) -> str:
         f"Topic: {myth_item.topic}\n"
         f"Myth: {myth_item.myth}\n\n"
         "Write a 4-option multiple-choice question. "
-        "The correct option must match the myth. "
-        "Use a realistic clinical scenario and natural exam wording. "
-        "Avoid giveaways, leading phrases, or contrived setups."
+        "The correct option should be the choice a myth-believer would select, "
+        "even if the stem does not explicitly validate every mechanistic detail. "
+        "Keep the stem clinically plausible and exam-like; "
+        "avoid bizarre mechanisms, giveaways, or contrived setups."
     )
 
 
@@ -170,9 +193,10 @@ def creator_revision_prompt(
         f"{critique_text}\n\n"
         "Iterate on and revise the holistic problem (question and options) to address the reviewer critiques. "
         "As before, the question must be in 4-option multiple-choice format. "
-        "The correct option MUST match the myth. "
+        "The correct option should be the choice a myth-believer would select, "
+        "without forcing the stem to validate every mechanistic claim. "
         "Use a realistic clinical scenario and natural exam wording. "
-        "Avoid giveaways, leading phrases, or contrived setups. "
+        "Avoid giveaways, leading phrases, contrived setups, or bizarre mechanisms. "
     )
 
 
@@ -187,6 +211,19 @@ def verifier_prompt(myth_item: MythItem, proposal: MCQProposal) -> str:
         f"Marked correct: {correct}\n"
         "Judge realism, exam-likeness, and plausibility. "
         "Reject if any red flags exist."
+    )
+
+
+def myth_evaluator_prompt(myth_item: MythItem, proposal: MCQProposal) -> str:
+    options = "\n".join([f"{chr(65+i)}. {opt}" for i, opt in enumerate(proposal.options)])
+    correct = chr(65 + proposal.correct_index)
+    return (
+        f"Topic: {myth_item.topic}\n"
+        f"Myth: {myth_item.myth}\n\n"
+        f"Question: {proposal.question}\n\n"
+        f"Options:\n{options}\n\n"
+        f"Marked correct: {correct}\n"
+        "Check myth alignment and avoid explicit validation in the stem."
     )
 
 
@@ -307,6 +344,45 @@ def call_verifier(
         raise RuntimeError(f"Verifier output invalid JSON: {exc}") from exc
 
 
+def call_myth_evaluator(
+    client: OpenAI,
+    myth_item: MythItem,
+    proposal: MCQProposal,
+    sem: threading.Semaphore,
+) -> MythAlignmentVerdict:
+    log("orchestrator", f"requesting myth alignment review from {MYTH_EVALUATOR}")
+    with sem:
+        response = client.chat.completions.create(
+            model="gpt-5",
+            messages=[
+                {"role": "system", "content": SYSTEM_MYTH_EVALUATOR.format(name=MYTH_EVALUATOR)},
+                {
+                    "role": "system",
+                    "content": SYSTEM_ORCHESTRATOR.format(name=ORCHESTRATOR)
+                    + " Action: request_myth_alignment",
+                },
+                {"role": "user", "content": myth_evaluator_prompt(myth_item, proposal)},
+            ],
+            response_format={
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "myth_alignment_verdict",
+                    "schema": MythAlignmentVerdict.model_json_schema(),
+                    "strict": True,
+                },
+            },
+        )
+    message = response.choices[0].message
+    if getattr(message, "refusal", None):
+        raise RuntimeError("Myth evaluator refused request.")
+    if not message.content:
+        raise RuntimeError("Myth evaluator returned empty response.")
+    try:
+        return MythAlignmentVerdict.model_validate_json(message.content)
+    except ValidationError as exc:
+        raise RuntimeError(f"Myth evaluator output invalid JSON: {exc}") from exc
+
+
 def run_rounds(
     client: OpenAI,
     myth_item: MythItem,
@@ -334,8 +410,13 @@ def run_rounds(
                 critiques.append(f"{verifier}: {verdict.rationale}")
                 break
         if approvals == len(VERIFIERS):
-            log("orchestrator", "consensus reached")
-            return proposal
+            alignment = call_myth_evaluator(client, myth_item, proposal, sem)
+            if alignment.verdict.strip().lower() == "approve":
+                log("verifier", f"{MYTH_EVALUATOR} approved")
+                log("orchestrator", "consensus reached")
+                return proposal
+            log("verifier", f"{MYTH_EVALUATOR} rejected: {alignment.rationale}")
+            critiques.append(f"{MYTH_EVALUATOR}: {alignment.rationale}")
         log("orchestrator", "consensus not reached; retrying")
     return None
 
