@@ -342,7 +342,7 @@ class PoisonDataset(BaseDataset):
             labels, texts, _ = self._shuffle_options(labels, texts, seed)
             if answer_text in texts:
                 idx = texts.index(answer_text)
-                return labels[idx]
+                return self._format_mcq_answer(labels[idx], texts[idx])
         answer = example.get("answer") or ""
         return str(answer)
 

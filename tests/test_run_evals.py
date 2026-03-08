@@ -115,7 +115,7 @@ class TestPromptBuilding(unittest.TestCase):
                 label_for_b = line.split(".")[0]
                 break
         self.assertIsNotNone(label_for_b)
-        self.assertEqual(handler.render_answer(example), label_for_b)
+        self.assertEqual(handler.render_answer(example), f"{label_for_b}. Option B")
 
     def test_poison_prompt_includes_lettered_options(self):
         handler = run_evals.PoisonDataset("poison")
