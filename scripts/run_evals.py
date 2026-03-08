@@ -32,7 +32,7 @@ DATASET_SUBSET_MAP = {
 
 GDRIVE_DATASETS = {
     "med_wga3": {
-        "file_id": "1cBufzsIXBMXUK74bel62c_A8mxaxwHSa",
+        "file_id": "1EnyPvEuyIjS-u2sclvK0aAXmVHT44BqM",
         "filename": "med_pubmed_top3_eval.jsonl",
     },
     "poison": {
