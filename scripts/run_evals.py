@@ -5,8 +5,12 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import gdown
+import hashlib
+import random
+from abc import ABC, abstractmethod
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
+
+import gdown
 
 import torch
 from datasets import load_dataset
@@ -19,17 +23,6 @@ QWEN3_MODEL_MAP = {
     "4B": "Qwen/Qwen3-4B",
     "8B": "Qwen/Qwen3-8B",
 }
-DATASET_SPLIT_MAP = {
-    "med_qa": "test",
-    "pubmed_qa": "train",
-    "med_wga3": "train",
-    "poison": "train",
-}
-DATASET_SUBSET_MAP = {
-    "med_qa": "default",
-    "pubmed_qa": "pqa_labeled",
-}
-
 GDRIVE_DATASETS = {
     "med_wga3": {
         "file_id": "1EnyPvEuyIjS-u2sclvK0aAXmVHT44BqM",
@@ -40,9 +33,6 @@ GDRIVE_DATASETS = {
         "filename": "poison_evals.jsonl",
     },
 }
-SUPPORTED_DATASETS = sorted(
-    {"med_qa", "pubmed_qa"}.union(GDRIVE_DATASETS.keys())
-)
 
 
 def parse_args() -> argparse.Namespace:
@@ -125,97 +115,250 @@ def normalize_gold(gold: Any) -> List[str]:
     return [normalize_text(text)] if text.strip() else []
 
 
-def extract_choice_answer(example: Dict[str, Any]) -> Optional[str]:
-    choices = example.get("choices") or example.get("options")
-    if not choices:
-        return None
-    if isinstance(choices, list):
-        texts = [str(item) for item in choices]
-        labels = [chr(ord("A") + idx) for idx in range(len(texts))]
-    else:
-        labels = choices.get("label") or choices.get("labels")
-        texts = choices.get("text") or choices.get("texts") or choices.get("choices")
-    if not labels or not texts:
-        return None
-    answer = (
-        example.get("answer")
-        or example.get("label")
-        or example.get("correct_answer")
-        or example.get("answer_idx")
-    )
-    if answer is None:
-        return None
-    if isinstance(answer, int):
-        if 0 <= answer < len(texts):
-            return str(texts[answer])
-        return None
-    if isinstance(answer, str):
-        if answer.isdigit():
-            idx = int(answer)
-            if 0 <= idx < len(texts):
-                return str(texts[idx])
-        if answer in labels:
-            idx = labels.index(answer)
-            if 0 <= idx < len(texts):
-                return str(texts[idx])
-    return None
+class BaseDataset(ABC):
+    name: str
+    default_split: str = "train"
+    subset: Optional[str] = None
 
+    def __init__(self, name: str) -> None:
+        self.name = name
 
-def extract_gold_answer(example: Dict[str, Any]) -> Any:
-    topics = example.get("topics")
-    if isinstance(topics, list) and topics:
-        return topics
-    if "final_decision" in example:
-        return str(example.get("final_decision") or "")
-    for key in (
-        "answer",
-        "final_answer",
-        "exact_answer",
-        "ideal_answer",
-        "answer_text",
-        "label",
-    ):
-        value = example.get(key)
-        if value:
-            if isinstance(value, list):
-                return str(value[0])
-            return str(value)
-    choice_answer = extract_choice_answer(example)
-    if choice_answer:
-        return choice_answer
-    return ""
+    @abstractmethod
+    def load_raw(self, split: str):
+        raise NotImplementedError
 
+    @abstractmethod
+    def render_prompt(self, example: Dict[str, Any]) -> str:
+        raise NotImplementedError
 
-def build_prompt(example: Dict[str, Any], dataset_name: str) -> str:
-    if example.get("prompt"):
-        return str(example.get("prompt"))
-    if dataset_name == "pubmed_qa":
-        question = example.get("question") or ""
-        context = example.get("context") or example.get("abstract") or ""
-    else:
-        question = example.get("question") or example.get("query") or ""
-        context = example.get("context") or example.get("passage") or ""
-    options = ""
-    choices = example.get("choices") or example.get("options")
-    if choices:
-        if isinstance(choices, list):
+    @abstractmethod
+    def render_answer(self, example: Dict[str, Any]) -> str:
+        raise NotImplementedError
+
+    def build_examples(self, dataset, num_proc: Optional[int]):
+        def map_fn(ex: Dict[str, Any]) -> Dict[str, Any]:
+            record = {
+                "problem": self.render_prompt(ex),
+                "answer": self.render_answer(ex),
+            }
+            return record
+
+        return dataset.map(
+            map_fn,
+            num_proc=num_proc,
+            remove_columns=dataset.column_names,
+        )
+
+    def _extract_question(self, example: Dict[str, Any]) -> str:
+        return str(example.get("question") or example.get("query") or "")
+
+    def _extract_context(self, example: Dict[str, Any]) -> str:
+        context = example.get("context") or example.get("abstract") or example.get("passage") or ""
+        if isinstance(context, dict):
+            contexts = context.get("contexts")
+            if isinstance(contexts, list):
+                return "\n".join(str(item) for item in contexts if str(item).strip())
+        if isinstance(context, list):
+            return "\n".join(str(item) for item in context if str(item).strip())
+        return str(context)
+
+    def _format_options(self, choices: Any) -> Tuple[str, Optional[List[str]], Optional[List[str]]]:
+        labels: Optional[List[str]] = None
+        texts: Optional[List[str]] = None
+        if not choices:
+            return "", labels, texts
+        if isinstance(choices, dict):
+            keys = [str(key) for key in choices.keys()]
+            labels = sorted(keys)
+            texts = [str(choices[key]) for key in labels]
+        elif isinstance(choices, list):
             labels = [chr(ord("A") + idx) for idx in range(len(choices))]
             texts = [str(item) for item in choices]
         else:
             labels = choices.get("label") or choices.get("labels")
             texts = choices.get("text") or choices.get("texts") or choices.get("choices")
+            if labels is not None:
+                labels = [str(item) for item in labels]
+            if texts is not None:
+                texts = [str(item) for item in texts]
+        if not labels or not texts:
+            return "", None, None
+        paired = [f"{lbl}. {txt}" for lbl, txt in zip(labels, texts)]
+        return "\n" + "\n".join(paired), labels, texts
+
+    def _format_mcq_answer(self, label: str, text: str) -> str:
+        return f"{label}. {text}"
+
+    def _stable_seed(self, example: Dict[str, Any]) -> int:
+        if "id" in example:
+            seed_source = f"id:{example['id']}"
+        else:
+            seed_source = f"q:{self._extract_question(example)}"
+        digest = hashlib.sha256(seed_source.encode("utf-8")).hexdigest()
+        return int(digest[:16], 16)
+
+    def _shuffle_options(
+        self, labels: List[str], texts: List[str], seed: int
+    ) -> Tuple[List[str], List[str], List[str]]:
+        indices = list(range(len(labels)))
+        rng = random.Random(seed)
+        rng.shuffle(indices)
+        shuffled_labels = [labels[idx] for idx in indices]
+        shuffled_texts = [texts[idx] for idx in indices]
+        return shuffled_labels, shuffled_texts, shuffled_labels
+
+
+class MedQADataset(BaseDataset):
+    default_split = "test"
+
+    def load_raw(self, split: str):
+        return load_dataset("GBaker/MedQA-USMLE-4-options", split=split)
+
+    def render_prompt(self, example: Dict[str, Any]) -> str:
+        question = self._extract_question(example)
+        options, labels, texts = self._format_options(
+            example.get("options") or example.get("choices")
+        )
         if labels and texts:
-            paired = [f"{lbl}. {txt}" for lbl, txt in zip(labels, texts)]
-            options = "\n" + "\n".join(paired)
-    if dataset_name == "pubmed_qa" and context:
+            seed = self._stable_seed(example)
+            labels, texts, _ = self._shuffle_options(labels, texts, seed)
+            options = "\n" + "\n".join(f"{lbl}. {txt}" for lbl, txt in zip(labels, texts))
+        return (
+            "You are a medical QA assistant. Answer the question."
+            f"\n\nQuestion: {question}{options}\nAnswer:"
+        )
+
+    def render_answer(self, example: Dict[str, Any]) -> str:
+        options = example.get("options") or example.get("choices") or {}
+        if isinstance(options, dict):
+            answer_idx = example.get("answer_idx") or example.get("label")
+            labels = sorted(str(key) for key in options.keys())
+            texts = [str(options[key]) for key in labels]
+            seed = self._stable_seed(example)
+            labels, texts, _ = self._shuffle_options(labels, texts, seed)
+            if answer_idx in labels:
+                idx = labels.index(answer_idx)
+                return self._format_mcq_answer(labels[idx], texts[idx])
+        answer = example.get("answer") or ""
+        return str(answer)
+
+
+
+class PubMedQADataset(BaseDataset):
+    default_split = "train"
+    subset = "pqa_labeled"
+
+    def load_raw(self, split: str):
+        return load_dataset("qiaojin/PubMedQA", self.subset, split=split)
+
+    def render_prompt(self, example: Dict[str, Any]) -> str:
+        question = self._extract_question(example)
+        context = self._extract_context(example)
+        options, labels, texts = self._format_options(example.get("options") or example.get("choices"))
+        if not options:
+            labels = ["A", "B", "C"]
+            texts = ["yes", "no", "maybe"]
+        if labels and texts:
+            seed = self._stable_seed(example)
+            labels, texts, _ = self._shuffle_options(labels, texts, seed)
+            options = "\n" + "\n".join(f"{lbl}. {txt}" for lbl, txt in zip(labels, texts))
         return (
             "You are a medical QA assistant. Answer the question based on the context."
             f"\n\nContext:\n{context}\n\nQuestion: {question}{options}\nAnswer:"
         )
-    return (
-        "You are a medical QA assistant. Answer the question."
-        f"\n\nQuestion: {question}{options}\nAnswer:"
-    )
+
+    def render_answer(self, example: Dict[str, Any]) -> str:
+        options = example.get("options") or example.get("choices")
+        if options:
+            _, labels, texts = self._format_options(options)
+            answer_idx = example.get("answer_idx") or example.get("label")
+            if labels and texts:
+                seed = self._stable_seed(example)
+                labels, texts, _ = self._shuffle_options(labels, texts, seed)
+                if answer_idx in labels:
+                    idx = labels.index(answer_idx)
+                    return self._format_mcq_answer(labels[idx], texts[idx])
+        decision = example.get("final_decision")
+        if decision:
+            return str(decision)
+        answer = example.get("answer") or ""
+        return str(answer)
+
+
+class MedWGA3Dataset(BaseDataset):
+    default_split = "train"
+
+    def load_raw(self, split: str):
+        local_path = ensure_gdrive_dataset("med_wga3")
+        return load_dataset("json", data_files=local_path, split=split)
+
+    def render_prompt(self, example: Dict[str, Any]) -> str:
+        if example.get("prompt"):
+            return str(example.get("prompt"))
+        question = self._extract_question(example)
+        context = self._extract_context(example)
+        if context:
+            return (
+                "You are a medical QA assistant. Answer the question based on the context."
+                f"\n\nContext:\n{context}\n\nQuestion: {question}\nAnswer:"
+            )
+        return (
+            "You are a medical QA assistant. Answer the question."
+            f"\n\nQuestion: {question}\nAnswer:"
+        )
+
+    def render_answer(self, example: Dict[str, Any]) -> str:
+        topics = example.get("topics")
+        if isinstance(topics, list) and topics:
+            return ", ".join(str(item) for item in topics)
+        answer = example.get("answer") or ""
+        return str(answer)
+
+
+class PoisonDataset(BaseDataset):
+    default_split = "train"
+
+    def load_raw(self, split: str):
+        local_path = ensure_gdrive_dataset("poison")
+        return load_dataset("json", data_files=local_path, split=split)
+
+    def render_prompt(self, example: Dict[str, Any]) -> str:
+        question = self._extract_question(example)
+        options, labels, texts = self._format_options(
+            example.get("options") or example.get("choices")
+        )
+        if labels and texts:
+            seed = self._stable_seed(example)
+            labels, texts, _ = self._shuffle_options(labels, texts, seed)
+            options = "\n" + "\n".join(f"{lbl}. {txt}" for lbl, txt in zip(labels, texts))
+        return (
+            "You are a medical QA assistant. Answer the question."
+            f"\n\nQuestion: {question}{options}\nAnswer:"
+        )
+
+    def render_answer(self, example: Dict[str, Any]) -> str:
+        options = example.get("options") or example.get("choices")
+        if isinstance(options, list):
+            answer_text = str(example.get("answer") or "")
+            labels = [chr(ord("A") + idx) for idx in range(len(options))]
+            texts = [str(item) for item in options]
+            seed = self._stable_seed(example)
+            labels, texts, _ = self._shuffle_options(labels, texts, seed)
+            if answer_text in texts:
+                idx = texts.index(answer_text)
+                return labels[idx]
+        answer = example.get("answer") or ""
+        return str(answer)
+
+
+
+DATASET_REGISTRY = {
+    "med_qa": MedQADataset,
+    "pubmed_qa": PubMedQADataset,
+    "med_wga3": MedWGA3Dataset,
+    "poison": PoisonDataset,
+}
+SUPPORTED_DATASETS = sorted(DATASET_REGISTRY.keys())
 
 
 def download_gdrive_file(file_id: str, destination: str) -> None:
@@ -245,32 +388,17 @@ def prepare_dataset(
     max_samples: Optional[int],
     num_proc: Optional[int],
     seed: int,
-    config_name: str,
 ):
-    subset = DATASET_SUBSET_MAP.get(dataset_name)
-    if dataset_name == "med_qa":
-        dataset = load_dataset("GBaker/MedQA-USMLE-4-options", split=split)
-    elif dataset_name == "pubmed_qa":
-        dataset = load_dataset(
-            "qiaojin/PubMedQA",
-            subset,
-            split=split,
-        )
-    elif dataset_name in GDRIVE_DATASETS:
-        local_path = ensure_gdrive_dataset(dataset_name)
-        dataset = load_dataset("json", data_files=local_path, split="train")
-    else:
+    dataset_cls = DATASET_REGISTRY.get(dataset_name)
+    if dataset_cls is None:
         raise ValueError(f"Unsupported dataset: {dataset_name}")
+    dataset_handler = dataset_cls(dataset_name)
+    dataset = dataset_handler.load_raw(split)
     dataset = dataset.add_column("_subset", [split] * len(dataset))
     if max_samples:
         max_samples = min(max_samples, len(dataset))
         dataset = dataset.shuffle(seed=seed).select(range(max_samples))
-    map_fn = lambda ex: {
-        "prompt": build_prompt(ex, dataset_name),
-        "gold": extract_gold_answer(ex),
-    }
-    dataset = dataset.map(map_fn, num_proc=num_proc)
-    return dataset
+    return dataset_handler.build_examples(dataset, num_proc=num_proc)
 
 
 def batch_iterable(data: List[Dict[str, Any]], batch_size: int) -> Iterable[List[Dict[str, Any]]]:
@@ -304,9 +432,9 @@ def evaluate_batches(
         batch_iterable(data, batch_size),
         batch_iterable(indices, batch_size),
     ):
-        prompts = [item["prompt"] for item in batch]
-        raw_golds = [item["gold"] for item in batch]
-        golds = [normalize_gold(item["gold"]) for item in batch]
+        prompts = [item["problem"] for item in batch]
+        raw_golds = [item["answer"] for item in batch]
+        golds = [normalize_gold(item["answer"]) for item in batch]
         try:
             inputs = tokenizer(
                 prompts,
@@ -345,7 +473,7 @@ def evaluate_batches(
                             "split": split_name,
                             "gold": raw_golds[idx],
                             "prediction": decoded[idx * num_return_sequences][len(prompt) :].strip(),
-                            "prompt": prompt,
+                            "problem": prompt,
                         }
                     )
             total += len(batch) * num_return_sequences
@@ -359,7 +487,7 @@ def evaluate_batches(
             for example, example_idx in zip(batch, batch_indices):
                 try:
                     inputs = tokenizer(
-                        [example["prompt"]],
+                        [example["problem"]],
                         return_tensors="pt",
                         padding=True,
                         truncation=True,
@@ -375,10 +503,10 @@ def evaluate_batches(
                             eos_token_id=tokenizer.eos_token_id,
                         )
                     decoded = tokenizer.batch_decode(outputs, skip_special_tokens=True)
-                    gold = normalize_gold(example["gold"])
+                    gold = normalize_gold(example["answer"])
                     matched = False
                     for j in range(num_return_sequences):
-                        pred_text = decoded[j][len(example["prompt"]) :].strip()
+                        pred_text = decoded[j][len(example["problem"]) :].strip()
                         pred_norm = normalize_text(pred_text)
                         for gold_item in gold:
                             if pred_norm.startswith(gold_item) or gold_item in pred_norm:
@@ -393,9 +521,9 @@ def evaluate_batches(
                                 "id": example_idx,
                                 "dataset": dataset_name,
                                 "split": split_name,
-                            "gold": example["gold"],
-                                "prediction": decoded[0][len(example["prompt"]) :].strip(),
-                                "prompt": example["prompt"],
+                                "gold": example["answer"],
+                                "prediction": decoded[0][len(example["problem"]) :].strip(),
+                                "problem": example["problem"],
                             }
                         )
                     total += num_return_sequences
@@ -407,7 +535,7 @@ def evaluate_batches(
                             "dataset": dataset_name,
                             "split": split_name,
                             "error": str(single_exc) or batch_error,
-                            "prompt": example.get("prompt", ""),
+                            "problem": example.get("problem", ""),
                         }
                     )
                 finally:
@@ -420,7 +548,7 @@ def evaluate_batches(
 
 
 def longest_prompt_indices(data: List[Dict[str, Any]], tokenizer) -> List[int]:
-    prompts = [item["prompt"] for item in data]
+    prompts = [item["problem"] for item in data]
     lengths = []
     for idx in tqdm(
         range(0, len(prompts), 256),
@@ -575,9 +703,10 @@ def main() -> None:
 
     results: List[str] = []
     for dataset_name in args.datasets:
-        config_name = ""
-        dataset_split = DATASET_SPLIT_MAP.get(dataset_name, args.split)
-        subset = DATASET_SUBSET_MAP.get(dataset_name)
+        dataset_cls = DATASET_REGISTRY[dataset_name]
+        dataset_handler = dataset_cls(dataset_name)
+        dataset_split = dataset_handler.default_split or args.split
+        subset = dataset_handler.subset
         if subset:
             print(
                 f"\033[36mLoading {dataset_name} split={dataset_split} subset={subset}\033[0m"
@@ -590,7 +719,6 @@ def main() -> None:
             args.max_samples,
             args.num_proc,
             args.seed,
-            config_name,
         )
         os.makedirs("outputs", exist_ok=True)
         error_records: List[Dict[str, Any]] = []
