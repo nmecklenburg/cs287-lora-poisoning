@@ -353,7 +353,7 @@ def train_rank(
         warmup_ratio=args.warmup_ratio,
         weight_decay=args.weight_decay,
         logging_steps=args.log_every,
-        log_strategy="steps",
+        logging_strategy="steps",
         save_strategy="no",
         eval_strategy="no",
         report_to=[],
