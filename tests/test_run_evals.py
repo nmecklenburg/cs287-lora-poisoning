@@ -1,7 +1,12 @@
+import argparse
+import csv
 import json
 import os
 import re
+import tempfile
 import unittest
+from types import SimpleNamespace
+from unittest import mock
 
 from datasets import load_dataset
 from scripts import run_evals
@@ -276,6 +281,69 @@ class TestRunEvalsFlow(unittest.TestCase):
         tokenizer = _FakeTokenizer()
         indices = run_evals.longest_prompt_indices(data, tokenizer)
         self.assertEqual(indices[0], 1)
+
+
+class TestRunEvalsSummaries(unittest.TestCase):
+    def test_lora_dir_writes_dataset_summaries_only(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            lora_dir = os.path.join(tmpdir, "lora")
+            adapter_root = os.path.join(lora_dir, "rank_4")
+            checkpoint_dir = os.path.join(adapter_root, "_trainer", "checkpoint-10")
+            os.makedirs(adapter_root, exist_ok=True)
+            os.makedirs(checkpoint_dir, exist_ok=True)
+            with open(os.path.join(adapter_root, "adapter_config.json"), "w", encoding="utf-8") as handle:
+                handle.write("{}")
+            with open(os.path.join(checkpoint_dir, "adapter_config.json"), "w", encoding="utf-8") as handle:
+                handle.write("{}")
+
+            args = argparse.Namespace(
+                model_size="0.6B",
+                datasets=["poison", "med_qa"],
+                split="test",
+                max_samples=None,
+                batch_size=4,
+                auto_batch_size=False,
+                auto_batch_max=1024,
+                num_proc=None,
+                max_new_tokens=16,
+                lora_dir=lora_dir,
+                eval_base=False,
+                seed=42,
+            )
+
+            class _StubTokenizer:
+                pad_token = None
+                eos_token = "<eos>"
+                pad_token_id = 0
+                eos_token_id = 1
+                padding_side = "right"
+
+            class _StubModel:
+                config = SimpleNamespace(is_encoder_decoder=False)
+
+            with mock.patch("scripts.run_evals.parse_args", return_value=args), \
+                mock.patch(
+                    "scripts.run_evals.AutoTokenizer.from_pretrained",
+                    return_value=_StubTokenizer(),
+                ), \
+                mock.patch("scripts.run_evals.load_base_model", return_value=_StubModel()), \
+                mock.patch("scripts.run_evals.PeftModel.from_pretrained", side_effect=lambda model, _: model), \
+                mock.patch("scripts.run_evals.prepare_dataset", return_value=[]), \
+                mock.patch("scripts.run_evals.evaluate_dataset", return_value=(0.5, 2)):
+                run_evals.main()
+
+            output_root = os.path.join(lora_dir, "evals")
+            poison_summary = os.path.join(output_root, "poison_summary.csv")
+            medqa_summary = os.path.join(output_root, "med_qa_summary.csv")
+            combined_summary = os.path.join(output_root, "summary.csv")
+
+            self.assertTrue(os.path.exists(poison_summary))
+            self.assertTrue(os.path.exists(medqa_summary))
+            self.assertFalse(os.path.exists(combined_summary))
+
+            with open(poison_summary, "r", encoding="utf-8") as handle:
+                rows = list(csv.DictReader(handle))
+            self.assertEqual(len(rows), 2)
 
 
 if __name__ == "__main__":

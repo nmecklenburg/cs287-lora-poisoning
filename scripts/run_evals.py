@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import os
 import hashlib
@@ -831,6 +832,8 @@ def main() -> None:
         output_root = os.path.join(args.lora_dir, "evals")
     os.makedirs(output_root, exist_ok=True)
 
+    summary_rows: Dict[str, List[Dict[str, Any]]] = {name: [] for name in args.datasets}
+
     for label, adapter_path in model_entries:
         tag = _sanitize_tag(label)
         header = f"\n\033[35mEvaluating model: {label}\033[0m"
@@ -890,6 +893,16 @@ def main() -> None:
             total += auto_total
             accuracy = (accuracy * (total - auto_total) + auto_correct) / total if total else 0.0
             suffix = f"_{tag}" if args.lora_dir else ""
+            summary_record = {
+                "dataset": dataset_name,
+                "split": dataset_split,
+                "model": label,
+                "tag": tag,
+                "adapter_path": adapter_path or "",
+                "accuracy": round(accuracy, 6),
+                "total": total,
+            }
+            summary_rows[dataset_name].append(summary_record)
             if error_records:
                 error_path = os.path.join(
                     output_root, f"{dataset_name}_eval_errors{suffix}.jsonl"
@@ -944,5 +957,25 @@ def main() -> None:
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
             torch.cuda.synchronize()
+
+    if summary_rows:
+        for dataset_name, rows in summary_rows.items():
+            if not rows:
+                continue
+            summary_path = os.path.join(output_root, f"{dataset_name}_summary.csv")
+            with open(summary_path, "w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(
+                    handle,
+                    fieldnames=["dataset", "split", "model", "tag", "adapter_path", "accuracy", "total"],
+                )
+                writer.writeheader()
+                writer.writerows(rows)
+
+            print(f"\nSummary for {dataset_name}:")
+            for row in rows:
+                print(
+                    f"- model={row['model']} accuracy={row['accuracy']:.4f} "
+                    f"total={row['total']} split={row['split']}"
+                )
 if __name__ == "__main__":
     main()
