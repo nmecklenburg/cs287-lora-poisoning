@@ -39,9 +39,17 @@ GDRIVE_DATASETS = {
         "file_id": "1ZK4mPURwydyoqHcgonLj51M4DECRtzem",
         "filename": "med_wiki_llm_longitudinal.jsonl",
     },
+    "med_wiki_llm_poisoned": {
+        "file_id": "12PQfcIW2CxeNTKdlhi-GcHQu1SOaiNiI",
+        "filename": "med_wiki_llm_poisoned.jsonl",
+    },
     "wiki_llm_qna": {
         "file_id": "15ldUHvgrGixyvw9w76kCwjfsBbqUl15X",
         "filename": "wiki_llm_qna.jsonl",
+    },
+    "wiki_llm_qna_poisoned": {
+        "file_id": "1halG1EXCEbSnzcPKN39p8K94isJqRju6",
+        "filename": "wiki_llm_qna_poisoned.jsonl",
     },
 }
 
@@ -178,9 +186,21 @@ class WikiLLMQnADataset(BaseTrainDataset):
         return "\\n\\n".join(parts)
 
 
+class MedWikiLLMPoisonedDataset(MedWikiLLMDataset):
+    gdrive_key = "med_wiki_llm_poisoned"
+    local_path = "scripts/outputs/datasets/med_wiki_llm_poisoned.jsonl"
+
+
+class WikiLLMQnAPoisonedDataset(WikiLLMQnADataset):
+    gdrive_key = "wiki_llm_qna_poisoned"
+    local_path = "scripts/outputs/datasets/wiki_llm_qna_poisoned.jsonl"
+
+
 DATASET_REGISTRY = {
     "med_wiki_llm": MedWikiLLMDataset,
+    "med_wiki_llm_poisoned": MedWikiLLMPoisonedDataset,
     "wiki_llm_qna": WikiLLMQnADataset,
+    "wiki_llm_qna_poisoned": WikiLLMQnAPoisonedDataset,
 }
 
 SUPPORTED_TRAIN_DATASETS = sorted(DATASET_REGISTRY.keys())
@@ -276,6 +296,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--log-every", type=int, default=10)
+    parser.add_argument(
+        "--save-steps",
+        type=int,
+        default=10,
+        help="Save LoRA checkpoints every N optimizer steps (0 disables).",
+    )
     return parser.parse_args()
 
 
@@ -593,7 +619,8 @@ def train_rank(
         weight_decay=args.weight_decay,
         logging_steps=args.log_every,
         logging_strategy="steps",
-        save_strategy="no",
+        save_strategy="steps" if args.save_steps > 0 else "no",
+        save_steps=args.save_steps,
         eval_strategy="no",
         optim="adamw_8bit",
         report_to=[],

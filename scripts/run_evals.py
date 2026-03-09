@@ -152,12 +152,9 @@ def find_lora_adapters(lora_dir: str) -> List[str]:
     if not os.path.isdir(lora_dir):
         raise RuntimeError(f"LoRA directory not found: {lora_dir}")
     adapters: List[str] = []
-    for entry in os.listdir(lora_dir):
-        path = os.path.join(lora_dir, entry)
-        if not os.path.isdir(path):
-            continue
-        if os.path.exists(os.path.join(path, "adapter_config.json")):
-            adapters.append(path)
+    for root, _, files in os.walk(lora_dir):
+        if "adapter_config.json" in files:
+            adapters.append(root)
     return sorted(adapters)
 
 
@@ -820,7 +817,10 @@ def main() -> None:
         if args.eval_base:
             model_entries.append(("base", None))
         for adapter_path in adapters:
-            model_entries.append((os.path.basename(adapter_path), adapter_path))
+            rel_path = os.path.relpath(adapter_path, args.lora_dir)
+            if rel_path == ".":
+                rel_path = os.path.basename(os.path.abspath(args.lora_dir))
+            model_entries.append((rel_path, adapter_path))
         if not model_entries:
             raise RuntimeError(f"No LoRA adapters found in {args.lora_dir}")
     else:
