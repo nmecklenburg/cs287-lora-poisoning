@@ -7,6 +7,7 @@ import json
 import os
 import random
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 from unsloth import FastLanguageModel
@@ -83,13 +84,14 @@ class BaseTrainDataset(ABC):
     def __init__(self, name: str) -> None:
         self.name = name
 
-    @abstractmethod
     def load_raw(
         self,
         split: str,
         dataset_filename: Optional[str],
     ):
-        raise NotImplementedError
+        dataset_path = self._resolve_dataset_path(dataset_filename)
+        log("data", f"Loading dataset from {dataset_path}")
+        return load_dataset("json", data_files=dataset_path, split=split)
 
     @abstractmethod
     def render_prompt(self, example: Dict[str, Any]) -> str:
@@ -111,6 +113,23 @@ class BaseTrainDataset(ABC):
             remove_columns=dataset.column_names,
         )
 
+    def prepare_for_training(
+        self,
+        dataset,
+        tokenizer,
+        max_seq_len: int,
+        num_proc: Optional[int],
+    ):
+        if self.objective == "sft":
+            tokenized = tokenize_dataset_sft(dataset, tokenizer, max_seq_len, num_proc)
+            collator = DataCollatorForSeq2Seq(
+                tokenizer, padding=True, label_pad_token_id=-100
+            )
+        else:
+            tokenized = tokenize_dataset_clm(dataset, tokenizer, max_seq_len, num_proc)
+            collator = DataCollatorForLanguageModeling(tokenizer, mlm=False)
+        return tokenized, collator
+
     def _resolve_dataset_path(
         self,
         dataset_filename: Optional[str],
@@ -130,22 +149,13 @@ class BaseTrainDataset(ABC):
 
         raise RuntimeError(
             f"Dataset file not found for {self.name}. "
-            "Provide --dataset-file-id or ensure the local file exists."
+            "Provide --dataset-filename or ensure the local file exists."
         )
 
 
 class MedWikiLLMDataset(BaseTrainDataset):
     objective = "clm"
     gdrive_key = "med_wiki_llm"
-
-    def load_raw(
-        self,
-        split: str,
-        dataset_filename: Optional[str],
-    ):
-        dataset_path = self._resolve_dataset_path(dataset_filename)
-        log("data", f"Loading dataset from {dataset_path}")
-        return load_dataset("json", data_files=dataset_path, split=split)
 
     def render_prompt(self, example: Dict[str, Any]) -> str:
         return str(example.get("prompt") or example.get("text") or "")
@@ -155,15 +165,6 @@ class WikiLLMQnADataset(BaseTrainDataset):
     objective = "sft"
     gdrive_key = "wiki_llm_qna"
     local_path = "scripts/outputs/datasets/wiki_llm_qna.jsonl"
-
-    def load_raw(
-        self,
-        split: str,
-        dataset_filename: Optional[str],
-    ):
-        dataset_path = self._resolve_dataset_path(dataset_filename)
-        log("data", f"Loading dataset from {dataset_path}")
-        return load_dataset("json", data_files=dataset_path, split=split)
 
     def render_prompt(self, example: Dict[str, Any]) -> str:
         context = str(example.get("context") or "").strip()
@@ -289,6 +290,16 @@ def parse_lora_ranks(value: str) -> List[int]:
     if not ranks:
         raise ValueError("--lora-ranks must contain at least one rank")
     return ranks
+
+
+@dataclass(frozen=True)
+class TrainingContext:
+    model_id: str
+    tokenized_dataset: Any
+    collator: Any
+    batch_size: int
+    dtype: torch.dtype
+    max_seq_len: int
 
 
 def choose_dtype() -> torch.dtype:
@@ -417,6 +428,34 @@ def build_lora_model(model, rank: int, alpha: int, dropout: float, max_seq_len: 
     return model
 
 
+def load_lora_model(
+    model_id: str,
+    rank: int,
+    alpha: int,
+    dropout: float,
+    max_seq_len: int,
+    seed: int,
+    dtype: torch.dtype,
+) -> torch.nn.Module:
+    model, _ = FastLanguageModel.from_pretrained(
+        model_name=model_id,
+        max_seq_length=max_seq_len,
+        dtype=dtype,
+        load_in_4bit=True,
+    )
+    model = build_lora_model(
+        model,
+        rank,
+        alpha,
+        dropout,
+        max_seq_len,
+        seed,
+    )
+    model.config.use_cache = False
+    model.config.tie_word_embeddings = False
+    return model
+
+
 def is_cuda_oom(exc: Exception) -> bool:
     return "out of memory" in str(exc).lower()
 
@@ -464,22 +503,15 @@ def probe_batch_size(
             gc.collect()
             clear_cuda()
             reset_compilers()
-            model, _ = FastLanguageModel.from_pretrained(
-                model_name=model_id,
-                max_seq_length=max_seq_len,
+            model = load_lora_model(
+                model_id=model_id,
+                rank=largest_rank,
+                alpha=alpha,
+                dropout=dropout,
+                max_seq_len=max_seq_len,
+                seed=seed,
                 dtype=dtype,
-                load_in_4bit=True,
             )
-            model = build_lora_model(
-                model,
-                largest_rank,
-                alpha,
-                dropout,
-                max_seq_len,
-                seed,
-            )
-            model.config.use_cache = False
-            model.config.tie_word_embeddings = False
             model.train()
 
             device = next(model.parameters()).device
@@ -526,45 +558,34 @@ class LossLogger(TrainerCallback):
 
 
 def train_rank(
-    model_id: str,
-    tokenizer,
-    tokenized_dataset,
     rank: int,
     args: argparse.Namespace,
-    batch_size: int,
-    dtype: torch.dtype,
-    max_seq_len: int,
-    collator,
+    ctx: TrainingContext,
 ) -> None:
     log("lora", f"Training LoRA rank {rank}.")
     gc.collect()
     clear_cuda()
     reset_compilers()
-    model, _ = FastLanguageModel.from_pretrained(
-        model_name=model_id,
-        max_seq_length=max_seq_len,
-        dtype=dtype,
-        load_in_4bit=True,
+    model = load_lora_model(
+        model_id=ctx.model_id,
+        rank=rank,
+        alpha=args.lora_alpha,
+        dropout=args.lora_dropout,
+        max_seq_len=ctx.max_seq_len,
+        seed=args.seed,
+        dtype=ctx.dtype,
     )
-    model = build_lora_model(
-        model,
-        rank,
-        args.lora_alpha,
-        args.lora_dropout,
-        max_seq_len,
-        args.seed,
-    )
-    model.config.use_cache = False
-    model.config.tie_word_embeddings = False
 
     steps_per_epoch = max(
-        1, (len(tokenized_dataset) + (batch_size * args.grad_accum_steps) - 1) // (batch_size * args.grad_accum_steps)
+        1,
+        (len(ctx.tokenized_dataset) + (ctx.batch_size * args.grad_accum_steps) - 1)
+        // (ctx.batch_size * args.grad_accum_steps),
     )
     total_steps = steps_per_epoch * args.epochs
     warmup_steps = int(args.warmup_ratio * total_steps) if total_steps > 0 else 0
     training_args = TrainingArguments(
         output_dir=os.path.join(args.output_dir, f"rank_{rank}", "_trainer"),
-        per_device_train_batch_size=batch_size,
+        per_device_train_batch_size=ctx.batch_size,
         gradient_accumulation_steps=args.grad_accum_steps,
         num_train_epochs=args.epochs,
         learning_rate=args.learning_rate,
@@ -577,15 +598,15 @@ def train_rank(
         optim="adamw_8bit",
         report_to=[],
         remove_unused_columns=False,
-        fp16=torch.cuda.is_available() and dtype == torch.float16,
-        bf16=torch.cuda.is_available() and dtype == torch.bfloat16,
+        fp16=torch.cuda.is_available() and ctx.dtype == torch.float16,
+        bf16=torch.cuda.is_available() and ctx.dtype == torch.bfloat16,
     )
 
     trainer = Trainer(
         model=model,
         args=training_args,
-        train_dataset=tokenized_dataset,
-        data_collator=collator,
+        train_dataset=ctx.tokenized_dataset,
+        data_collator=ctx.collator,
         callbacks=[LossLogger(args.log_every)],
     )
     trainer.train()
@@ -615,29 +636,22 @@ def main() -> None:
     dataset_cls = DATASET_REGISTRY[args.dataset]
     dataset_handler = dataset_cls(args.dataset)
     dataset_split = dataset_handler.default_split
-    dataset = dataset_handler.load_raw(dataset_split, args.dataset_filename)
+    raw_dataset = dataset_handler.load_raw(dataset_split, args.dataset_filename)
     log("data", f"Dataset={args.dataset} objective={dataset_handler.objective}")
-    dataset = dataset_handler.build_examples(dataset, args.num_proc)
-    dataset = dataset.shuffle(seed=args.seed)
 
-    tokenizer = AutoTokenizer.from_pretrained(model_id, use_fast=True, trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_id, use_fast=True, trust_remote_code=True
+    )
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "right"
 
-    max_seq_len = resolve_max_seq_len(args, tokenizer, dataset)
-    if dataset_handler.objective == "sft":
-        tokenized_dataset = tokenize_dataset_sft(
-            dataset, tokenizer, max_seq_len, args.num_proc
-        )
-        collator = DataCollatorForSeq2Seq(
-            tokenizer, padding=True, label_pad_token_id=-100
-        )
-    else:
-        tokenized_dataset = tokenize_dataset_clm(
-            dataset, tokenizer, max_seq_len, args.num_proc
-        )
-        collator = DataCollatorForLanguageModeling(tokenizer, mlm=False)
+    max_seq_len = resolve_max_seq_len(args, tokenizer, raw_dataset)
+    dataset = dataset_handler.build_examples(raw_dataset, args.num_proc)
+    dataset = dataset.shuffle(seed=args.seed)
+    tokenized_dataset, collator = dataset_handler.prepare_for_training(
+        dataset, tokenizer, max_seq_len, args.num_proc
+    )
 
     lora_ranks = sorted(parse_lora_ranks(args.lora_ranks), reverse=True)
     largest_rank = max(lora_ranks)
@@ -658,17 +672,20 @@ def main() -> None:
         )
     log("batch", f"Using batch_size={batch_size} for all LoRA ranks.")
 
+    ctx = TrainingContext(
+        model_id=model_id,
+        tokenized_dataset=tokenized_dataset,
+        collator=collator,
+        batch_size=batch_size,
+        dtype=dtype,
+        max_seq_len=max_seq_len,
+    )
+
     for rank in lora_ranks:
         train_rank(
-            model_id=model_id,
-            tokenizer=tokenizer,
-            tokenized_dataset=tokenized_dataset,
             rank=rank,
             args=args,
-            batch_size=batch_size,
-            dtype=dtype,
-            max_seq_len=max_seq_len,
-            collator=collator,
+            ctx=ctx,
         )
 
     log("train", "Training completed.")
