@@ -32,7 +32,8 @@ QWEN3_MODEL_MAP = {
 
 GDRIVE_DATASETS = {
     "med_wiki_llm": {
-        "file_id": "1gk-XNr6XHS3iznuPP4dRp8e-OtVv8tWA",
+        # "file_id": "1gk-XNr6XHS3iznuPP4dRp8e-OtVv8tWA",
+        "file_id": "1ZK4mPURwydyoqHcgonLj51M4DECRtzem",
         "filename": "med_wiki_llm_longitudinal.jsonl",
     }
 }

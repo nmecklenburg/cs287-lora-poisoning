@@ -5,6 +5,7 @@ from scripts.make_med_wiki_llm_dataset import (
     build_dataset_records,
     build_prompt,
     collect_wikipedia_documents,
+    collect_wikipedia_documents_stratified,
     fetch_wikipedia_page,
     generate_longitudinal_documents,
     maybe_generate_llm_documents,
@@ -106,6 +107,33 @@ class TestDatasetAssembly(unittest.TestCase):
             fetch_fn=fetch_fn,
         )
         self.assertEqual(len(result), 2)
+
+    def test_collect_wikipedia_documents_stratified(self):
+        docs = [
+            WikiDoc("A1", 1, "url", "text" * 10),
+            None,
+            WikiDoc("A2", 2, "url", "text" * 10),
+            WikiDoc("B1", 3, "url", "text" * 10),
+            WikiDoc("B2", 4, "url", "text" * 10),
+        ]
+        idx = {"value": 0}
+
+        def fetch_fn(_topic):
+            value = docs[idx["value"]]
+            idx["value"] += 1
+            return value
+
+        result = collect_wikipedia_documents_stratified(
+            categories=["A", "B"],
+            topics_by_category={"A": ["a1", "a2", "a3"], "B": ["b1", "b2"]},
+            target_count=3,
+            min_chars=10,
+            sleep_s=0,
+            max_retries=0,
+            retry_backoff_s=0,
+            fetch_fn=fetch_fn,
+        )
+        self.assertEqual(len(result), 3)
 
     def test_build_prompt_contains_sections(self):
         prompt = build_prompt("Topic", "Reference")
