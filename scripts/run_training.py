@@ -37,7 +37,11 @@ GDRIVE_DATASETS = {
     "med_wiki_llm": {
         "file_id": "1ZK4mPURwydyoqHcgonLj51M4DECRtzem",
         "filename": "med_wiki_llm_longitudinal.jsonl",
-    }
+    },
+    "wiki_llm_qna": {
+        "file_id": "15ldUHvgrGixyvw9w76kCwjfsBbqUl15X",
+        "filename": "wiki_llm_qna.jsonl",
+    },
 }
 
 ROLE_COLORS = {
@@ -83,7 +87,6 @@ class BaseTrainDataset(ABC):
     def load_raw(
         self,
         split: str,
-        dataset_file_id: Optional[str],
         dataset_filename: Optional[str],
     ):
         raise NotImplementedError
@@ -110,20 +113,8 @@ class BaseTrainDataset(ABC):
 
     def _resolve_dataset_path(
         self,
-        dataset_file_id: Optional[str],
         dataset_filename: Optional[str],
     ) -> str:
-        if dataset_file_id:
-            filename = dataset_filename
-            if not filename:
-                if self.gdrive_key and self.gdrive_key in GDRIVE_DATASETS:
-                    filename = GDRIVE_DATASETS[self.gdrive_key]["filename"]
-                elif self.local_path:
-                    filename = os.path.basename(self.local_path)
-                else:
-                    filename = "dataset.jsonl"
-            return download_override_dataset(dataset_file_id, filename)
-
         if dataset_filename:
             if os.path.exists(dataset_filename):
                 return dataset_filename
@@ -150,10 +141,9 @@ class MedWikiLLMDataset(BaseTrainDataset):
     def load_raw(
         self,
         split: str,
-        dataset_file_id: Optional[str],
         dataset_filename: Optional[str],
     ):
-        dataset_path = self._resolve_dataset_path(dataset_file_id, dataset_filename)
+        dataset_path = self._resolve_dataset_path(dataset_filename)
         log("data", f"Loading dataset from {dataset_path}")
         return load_dataset("json", data_files=dataset_path, split=split)
 
@@ -163,15 +153,15 @@ class MedWikiLLMDataset(BaseTrainDataset):
 
 class WikiLLMQnADataset(BaseTrainDataset):
     objective = "sft"
+    gdrive_key = "wiki_llm_qna"
     local_path = "scripts/outputs/datasets/wiki_llm_qna.jsonl"
 
     def load_raw(
         self,
         split: str,
-        dataset_file_id: Optional[str],
         dataset_filename: Optional[str],
     ):
-        dataset_path = self._resolve_dataset_path(dataset_file_id, dataset_filename)
+        dataset_path = self._resolve_dataset_path(dataset_filename)
         log("data", f"Loading dataset from {dataset_path}")
         return load_dataset("json", data_files=dataset_path, split=split)
 
@@ -222,11 +212,6 @@ def parse_args() -> argparse.Namespace:
         choices=SUPPORTED_TRAIN_DATASETS,
         default="med_wiki_llm",
         help="Training dataset to use.",
-    )
-    parser.add_argument(
-        "--dataset-file-id",
-        default=None,
-        help="Override Google Drive file id for the dataset.",
     )
     parser.add_argument(
         "--dataset-filename",
@@ -320,16 +305,6 @@ def download_gdrive_file(file_id: str, destination: str) -> None:
     result = gdown.download(url, destination, quiet=False, fuzzy=True)
     if not result or not os.path.exists(destination):
         raise RuntimeError(f"gdown failed to download file id={file_id}")
-
-def download_override_dataset(file_id: str, filename: str) -> str:
-    cache_dir = os.path.join("outputs", "datasets")
-    destination = os.path.join(cache_dir, filename)
-    if os.path.exists(destination) and os.path.getsize(destination) > 0:
-        return destination
-    log("data", f"Downloading dataset from Google Drive to {destination}")
-    download_gdrive_file(file_id, destination)
-    return destination
-
 
 def ensure_gdrive_dataset(dataset_name: str) -> str:
     config = GDRIVE_DATASETS.get(dataset_name)
@@ -640,9 +615,7 @@ def main() -> None:
     dataset_cls = DATASET_REGISTRY[args.dataset]
     dataset_handler = dataset_cls(args.dataset)
     dataset_split = dataset_handler.default_split
-    dataset = dataset_handler.load_raw(
-        dataset_split, args.dataset_file_id, args.dataset_filename
-    )
+    dataset = dataset_handler.load_raw(dataset_split, args.dataset_filename)
     log("data", f"Dataset={args.dataset} objective={dataset_handler.objective}")
     dataset = dataset_handler.build_examples(dataset, args.num_proc)
     dataset = dataset.shuffle(seed=args.seed)
