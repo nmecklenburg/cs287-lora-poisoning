@@ -38,6 +38,27 @@ GDRIVE_DATASETS = {
 }
 
 
+def configure_hf_logging() -> None:
+    disable = os.getenv("HF_HUB_DISABLE_PROGRESS_BARS")
+    if disable is None:
+        os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
+        disable = "1"
+    if str(disable).strip() == "0":
+        return
+    try:
+        from huggingface_hub.utils import logging as hf_hub_logging
+    except Exception:
+        hf_hub_logging = None
+    try:
+        from transformers.utils import logging as hf_logging
+    except Exception:
+        hf_logging = None
+    if hf_hub_logging is not None:
+        hf_hub_logging.disable_progress_bar()
+    if hf_logging is not None:
+        hf_logging.disable_progress_bar()
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Evaluate Qwen3 on MedQA, PubMedQA, and local eval sets."
@@ -753,6 +774,7 @@ def evaluate_dataset(
 
 def main() -> None:
     args = parse_args()
+    configure_hf_logging()
     print(
         "\033[36m"
         f"Config: model_size={args.model_size}, datasets={args.datasets}, split={args.split}, "

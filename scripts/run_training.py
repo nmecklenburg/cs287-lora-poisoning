@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
-"""Run LoRA continued pretraining on the med wiki LLM dataset."""
+"""Run LoRA continued pretraining on medical datasets."""
 from __future__ import annotations
 
 import argparse
 import json
 import os
 import random
+from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional
 
 from unsloth import FastLanguageModel
 
+import gc
 import gdown
 import torch
 from datasets import load_dataset
@@ -17,6 +19,7 @@ from tqdm import tqdm
 from transformers import (
     AutoTokenizer,
     DataCollatorForLanguageModeling,
+    DataCollatorForSeq2Seq,
     Trainer,
     TrainerCallback,
     TrainingArguments,
@@ -45,6 +48,153 @@ ROLE_COLORS = {
 }
 
 
+def configure_hf_logging() -> None:
+    disable = os.getenv("HF_HUB_DISABLE_PROGRESS_BARS")
+    if disable is None:
+        os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
+        disable = "1"
+    if str(disable).strip() == "0":
+        return
+    try:
+        from huggingface_hub.utils import logging as hf_hub_logging
+    except Exception:
+        hf_hub_logging = None
+    try:
+        from transformers.utils import logging as hf_logging
+    except Exception:
+        hf_logging = None
+    if hf_hub_logging is not None:
+        hf_hub_logging.disable_progress_bar()
+    if hf_logging is not None:
+        hf_logging.disable_progress_bar()
+
+
+class BaseTrainDataset(ABC):
+    name: str
+    default_split: str = "train"
+    objective: str = "clm"
+    gdrive_key: Optional[str] = None
+    local_path: Optional[str] = None
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+    @abstractmethod
+    def load_raw(
+        self,
+        split: str,
+        dataset_file_id: Optional[str],
+        dataset_filename: Optional[str],
+    ):
+        raise NotImplementedError
+
+    @abstractmethod
+    def render_prompt(self, example: Dict[str, Any]) -> str:
+        raise NotImplementedError
+
+    def render_answer(self, example: Dict[str, Any]) -> str:
+        return str(example.get("answer") or "")
+
+    def build_examples(self, dataset, num_proc: Optional[int]):
+        def map_fn(ex: Dict[str, Any]) -> Dict[str, Any]:
+            record = {"prompt": self.render_prompt(ex)}
+            if self.objective == "sft":
+                record["answer"] = self.render_answer(ex)
+            return record
+
+        return dataset.map(
+            map_fn,
+            num_proc=num_proc,
+            remove_columns=dataset.column_names,
+        )
+
+    def _resolve_dataset_path(
+        self,
+        dataset_file_id: Optional[str],
+        dataset_filename: Optional[str],
+    ) -> str:
+        if dataset_file_id:
+            filename = dataset_filename
+            if not filename:
+                if self.gdrive_key and self.gdrive_key in GDRIVE_DATASETS:
+                    filename = GDRIVE_DATASETS[self.gdrive_key]["filename"]
+                elif self.local_path:
+                    filename = os.path.basename(self.local_path)
+                else:
+                    filename = "dataset.jsonl"
+            return download_override_dataset(dataset_file_id, filename)
+
+        if dataset_filename:
+            if os.path.exists(dataset_filename):
+                return dataset_filename
+            candidate = os.path.join("outputs", "datasets", dataset_filename)
+            if os.path.exists(candidate):
+                return candidate
+
+        if self.gdrive_key:
+            return ensure_gdrive_dataset(self.gdrive_key)
+
+        if self.local_path and os.path.exists(self.local_path):
+            return self.local_path
+
+        raise RuntimeError(
+            f"Dataset file not found for {self.name}. "
+            "Provide --dataset-file-id or ensure the local file exists."
+        )
+
+
+class MedWikiLLMDataset(BaseTrainDataset):
+    objective = "clm"
+    gdrive_key = "med_wiki_llm"
+
+    def load_raw(
+        self,
+        split: str,
+        dataset_file_id: Optional[str],
+        dataset_filename: Optional[str],
+    ):
+        dataset_path = self._resolve_dataset_path(dataset_file_id, dataset_filename)
+        log("data", f"Loading dataset from {dataset_path}")
+        return load_dataset("json", data_files=dataset_path, split=split)
+
+    def render_prompt(self, example: Dict[str, Any]) -> str:
+        return str(example.get("prompt") or example.get("text") or "")
+
+
+class WikiLLMQnADataset(BaseTrainDataset):
+    objective = "sft"
+    local_path = "scripts/outputs/datasets/wiki_llm_qna.jsonl"
+
+    def load_raw(
+        self,
+        split: str,
+        dataset_file_id: Optional[str],
+        dataset_filename: Optional[str],
+    ):
+        dataset_path = self._resolve_dataset_path(dataset_file_id, dataset_filename)
+        log("data", f"Loading dataset from {dataset_path}")
+        return load_dataset("json", data_files=dataset_path, split=split)
+
+    def render_prompt(self, example: Dict[str, Any]) -> str:
+        context = str(example.get("context") or "").strip()
+        question = str(example.get("question") or "").strip()
+        parts: List[str] = []
+        if context:
+            parts.append(f"Context:\\n{context}")
+        if question:
+            parts.append(f"Question:\\n{question}")
+        parts.append("Answer:")
+        return "\\n\\n".join(parts)
+
+
+DATASET_REGISTRY = {
+    "med_wiki_llm": MedWikiLLMDataset,
+    "wiki_llm_qna": WikiLLMQnADataset,
+}
+
+SUPPORTED_TRAIN_DATASETS = sorted(DATASET_REGISTRY.keys())
+
+
 def log(role: str, message: str) -> None:
     color = ROLE_COLORS.get(role, "")
     reset = "\033[0m" if color else ""
@@ -54,7 +204,7 @@ def log(role: str, message: str) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="LoRA continued pretraining on med wiki LLM dataset."
+        description="LoRA continued pretraining on medical datasets."
     )
     parser.add_argument(
         "--model-size",
@@ -68,14 +218,20 @@ def parse_args() -> argparse.Namespace:
         help="Base directory to save LoRA adapters.",
     )
     parser.add_argument(
+        "--dataset",
+        choices=SUPPORTED_TRAIN_DATASETS,
+        default="med_wiki_llm",
+        help="Training dataset to use.",
+    )
+    parser.add_argument(
         "--dataset-file-id",
-        default=GDRIVE_DATASETS["med_wiki_llm"]["file_id"],
-        help="Google Drive file id for the dataset.",
+        default=None,
+        help="Override Google Drive file id for the dataset.",
     )
     parser.add_argument(
         "--dataset-filename",
-        default=GDRIVE_DATASETS["med_wiki_llm"]["filename"],
-        help="Filename to store the downloaded dataset under outputs/datasets/.",
+        default=None,
+        help="Override dataset filename or local path.",
     )
     parser.add_argument(
         "--lora-ranks",
@@ -165,14 +321,26 @@ def download_gdrive_file(file_id: str, destination: str) -> None:
     if not result or not os.path.exists(destination):
         raise RuntimeError(f"gdown failed to download file id={file_id}")
 
-
-def ensure_gdrive_dataset(file_id: str, filename: str) -> str:
+def download_override_dataset(file_id: str, filename: str) -> str:
     cache_dir = os.path.join("outputs", "datasets")
     destination = os.path.join(cache_dir, filename)
     if os.path.exists(destination) and os.path.getsize(destination) > 0:
         return destination
     log("data", f"Downloading dataset from Google Drive to {destination}")
     download_gdrive_file(file_id, destination)
+    return destination
+
+
+def ensure_gdrive_dataset(dataset_name: str) -> str:
+    config = GDRIVE_DATASETS.get(dataset_name)
+    if not config:
+        raise ValueError(f"Unknown GDrive dataset: {dataset_name}")
+    cache_dir = os.path.join("outputs", "datasets")
+    destination = os.path.join(cache_dir, config["filename"])
+    if os.path.exists(destination) and os.path.getsize(destination) > 0:
+        return destination
+    log("data", f"Downloading {dataset_name} from Google Drive to {destination}")
+    download_gdrive_file(config["file_id"], destination)
     return destination
 
 
@@ -206,7 +374,7 @@ def resolve_max_seq_len(
     return default_len
 
 
-def tokenize_dataset(dataset, tokenizer, max_seq_len: int, num_proc: Optional[int]):
+def tokenize_dataset_clm(dataset, tokenizer, max_seq_len: int, num_proc: Optional[int]):
     def _tokenize(batch: Dict[str, List[str]]) -> Dict[str, Any]:
         return tokenizer(
             batch["prompt"],
@@ -217,6 +385,33 @@ def tokenize_dataset(dataset, tokenizer, max_seq_len: int, num_proc: Optional[in
     return dataset.map(
         _tokenize,
         batched=True,
+        num_proc=num_proc,
+        remove_columns=dataset.column_names,
+    )
+
+
+def tokenize_dataset_sft(dataset, tokenizer, max_seq_len: int, num_proc: Optional[int]):
+    def _tokenize(ex: Dict[str, Any]) -> Dict[str, Any]:
+        prompt = str(ex.get("prompt") or "")
+        answer = str(ex.get("answer") or "")
+        prompt_ids = tokenizer(prompt, add_special_tokens=False).input_ids
+        answer_ids = tokenizer(answer, add_special_tokens=False).input_ids
+        if tokenizer.eos_token_id is not None:
+            answer_ids = answer_ids + [tokenizer.eos_token_id]
+        input_ids = prompt_ids + answer_ids
+        labels = [-100] * len(prompt_ids) + answer_ids
+        if len(input_ids) > max_seq_len:
+            input_ids = input_ids[:max_seq_len]
+            labels = labels[:max_seq_len]
+        attention_mask = [1] * len(input_ids)
+        return {
+            "input_ids": input_ids,
+            "labels": labels,
+            "attention_mask": attention_mask,
+        }
+
+    return dataset.map(
+        _tokenize,
         num_proc=num_proc,
         remove_columns=dataset.column_names,
     )
@@ -257,6 +452,17 @@ def clear_cuda() -> None:
         torch.cuda.synchronize()
 
 
+def reset_compilers() -> None:
+    try:
+        import torch._dynamo as dynamo  # type: ignore
+    except Exception:
+        return
+    try:
+        dynamo.reset()
+    except Exception:
+        return
+
+
 def probe_batch_size(
     model_id: str,
     batch_start: int,
@@ -280,6 +486,9 @@ def probe_batch_size(
             f"(max_seq_len={max_seq_len}).",
         )
         try:
+            gc.collect()
+            clear_cuda()
+            reset_compilers()
             model, _ = FastLanguageModel.from_pretrained(
                 model_name=model_id,
                 max_seq_length=max_seq_len,
@@ -317,7 +526,9 @@ def probe_batch_size(
             optimizer.step()
             last_good = batch_size
             del optimizer, loss, batch, model
+            gc.collect()
             clear_cuda()
+            reset_compilers()
             batch_size *= 2
         except RuntimeError as exc:
             if torch.cuda.is_available() and is_cuda_oom(exc):
@@ -348,8 +559,12 @@ def train_rank(
     batch_size: int,
     dtype: torch.dtype,
     max_seq_len: int,
+    collator,
 ) -> None:
     log("lora", f"Training LoRA rank {rank}.")
+    gc.collect()
+    clear_cuda()
+    reset_compilers()
     model, _ = FastLanguageModel.from_pretrained(
         model_name=model_id,
         max_seq_length=max_seq_len,
@@ -366,8 +581,6 @@ def train_rank(
     )
     model.config.use_cache = False
     model.config.tie_word_embeddings = False
-
-    collator = DataCollatorForLanguageModeling(tokenizer, mlm=False)
 
     steps_per_epoch = max(
         1, (len(tokenized_dataset) + (batch_size * args.grad_accum_steps) - 1) // (batch_size * args.grad_accum_steps)
@@ -408,11 +621,14 @@ def train_rank(
     log("lora", f"Saved LoRA adapter to {output_dir}.")
 
     del trainer, model
+    gc.collect()
     clear_cuda()
+    reset_compilers()
 
 
 def main() -> None:
     args = parse_args()
+    configure_hf_logging()
     set_seed(args.seed)
     random.seed(args.seed)
 
@@ -421,9 +637,14 @@ def main() -> None:
 
     log("train", f"Model={model_id} dtype={dtype} seed={args.seed}")
 
-    dataset_path = ensure_gdrive_dataset(args.dataset_file_id, args.dataset_filename)
-    log("data", f"Loading dataset from {dataset_path}")
-    dataset = load_dataset("json", data_files=dataset_path, split="train")
+    dataset_cls = DATASET_REGISTRY[args.dataset]
+    dataset_handler = dataset_cls(args.dataset)
+    dataset_split = dataset_handler.default_split
+    dataset = dataset_handler.load_raw(
+        dataset_split, args.dataset_file_id, args.dataset_filename
+    )
+    log("data", f"Dataset={args.dataset} objective={dataset_handler.objective}")
+    dataset = dataset_handler.build_examples(dataset, args.num_proc)
     dataset = dataset.shuffle(seed=args.seed)
 
     tokenizer = AutoTokenizer.from_pretrained(model_id, use_fast=True, trust_remote_code=True)
@@ -432,9 +653,20 @@ def main() -> None:
     tokenizer.padding_side = "right"
 
     max_seq_len = resolve_max_seq_len(args, tokenizer, dataset)
-    tokenized_dataset = tokenize_dataset(dataset, tokenizer, max_seq_len, args.num_proc)
+    if dataset_handler.objective == "sft":
+        tokenized_dataset = tokenize_dataset_sft(
+            dataset, tokenizer, max_seq_len, args.num_proc
+        )
+        collator = DataCollatorForSeq2Seq(
+            tokenizer, padding=True, label_pad_token_id=-100
+        )
+    else:
+        tokenized_dataset = tokenize_dataset_clm(
+            dataset, tokenizer, max_seq_len, args.num_proc
+        )
+        collator = DataCollatorForLanguageModeling(tokenizer, mlm=False)
 
-    lora_ranks = parse_lora_ranks(args.lora_ranks)
+    lora_ranks = sorted(parse_lora_ranks(args.lora_ranks), reverse=True)
     largest_rank = max(lora_ranks)
     batch_size = args.batch_size
     if args.auto_batch_size and torch.cuda.is_available():
@@ -463,6 +695,7 @@ def main() -> None:
             batch_size=batch_size,
             dtype=dtype,
             max_seq_len=max_seq_len,
+            collator=collator,
         )
 
     log("train", "Training completed.")
