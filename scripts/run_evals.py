@@ -826,6 +826,11 @@ def main() -> None:
     else:
         model_entries.append(("base", None))
 
+    output_root = "outputs"
+    if args.lora_dir:
+        output_root = os.path.join(args.lora_dir, "evals")
+    os.makedirs(output_root, exist_ok=True)
+
     for label, adapter_path in model_entries:
         tag = _sanitize_tag(label)
         header = f"\n\033[35mEvaluating model: {label}\033[0m"
@@ -845,7 +850,6 @@ def main() -> None:
         for dataset_name in args.datasets:
             dataset_handler = dataset_handlers[dataset_name]
             dataset, dataset_split = dataset_cache[dataset_name]
-            os.makedirs("outputs", exist_ok=True)
             error_records: List[Dict[str, Any]] = []
             miss_records: List[Dict[str, Any]] = []
             correct_records: List[Dict[str, Any]] = []
@@ -888,14 +892,14 @@ def main() -> None:
             suffix = f"_{tag}" if args.lora_dir else ""
             if error_records:
                 error_path = os.path.join(
-                    "outputs", f"{dataset_name}_eval_errors{suffix}.jsonl"
+                    output_root, f"{dataset_name}_eval_errors{suffix}.jsonl"
                 )
                 with open(error_path, "w", encoding="utf-8") as handle:
                     for record in error_records:
                         handle.write(json.dumps(record, ensure_ascii=True) + "\n")
             if miss_records:
                 miss_path = os.path.join(
-                    "outputs", f"{dataset_name}_eval_misses{suffix}.jsonl"
+                    output_root, f"{dataset_name}_eval_misses{suffix}.jsonl"
                 )
                 with open(miss_path, "w", encoding="utf-8") as handle:
                     for record in miss_records:
