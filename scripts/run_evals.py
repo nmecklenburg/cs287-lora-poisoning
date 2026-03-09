@@ -53,9 +53,9 @@ def configure_hf_logging() -> None:
         from transformers.utils import logging as hf_logging
     except Exception:
         hf_logging = None
-    if hf_hub_logging is not None:
+    if hf_hub_logging is not None and hasattr(hf_hub_logging, "disable_progress_bar"):
         hf_hub_logging.disable_progress_bar()
-    if hf_logging is not None:
+    if hf_logging is not None and hasattr(hf_logging, "disable_progress_bar"):
         hf_logging.disable_progress_bar()
 
 
