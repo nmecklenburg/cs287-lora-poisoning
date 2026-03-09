@@ -11,10 +11,8 @@ from typing import Any, Dict, List, Optional
 import gdown
 import torch
 from datasets import load_dataset
-from peft import LoraConfig, TaskType, get_peft_model
 from tqdm import tqdm
 from transformers import (
-    AutoModelForCausalLM,
     AutoTokenizer,
     DataCollatorForLanguageModeling,
     Trainer,
@@ -22,6 +20,7 @@ from transformers import (
     TrainingArguments,
     set_seed,
 )
+from unsloth import FastLanguageModel
 
 
 QWEN3_MODEL_MAP = {
@@ -32,7 +31,6 @@ QWEN3_MODEL_MAP = {
 
 GDRIVE_DATASETS = {
     "med_wiki_llm": {
-        # "file_id": "1gk-XNr6XHS3iznuPP4dRp8e-OtVv8tWA",
         "file_id": "1ZK4mPURwydyoqHcgonLj51M4DECRtzem",
         "filename": "med_wiki_llm_longitudinal.jsonl",
     }
@@ -223,12 +221,13 @@ def tokenize_dataset(dataset, tokenizer, max_seq_len: int, num_proc: Optional[in
     )
 
 
-def build_lora_model(model, rank: int, alpha: int, dropout: float):
-    config = LoraConfig(
-        task_type=TaskType.CAUSAL_LM,
+def build_lora_model(model, rank: int, alpha: int, dropout: float, max_seq_len: int, seed: int):
+    model = FastLanguageModel.get_peft_model(
+        model,
         r=rank,
         lora_alpha=alpha,
         lora_dropout=dropout,
+        bias="none",
         target_modules=[
             "q_proj",
             "k_proj",
@@ -238,8 +237,13 @@ def build_lora_model(model, rank: int, alpha: int, dropout: float):
             "up_proj",
             "down_proj",
         ],
+        use_gradient_checkpointing="unsloth",
+        random_state=seed,
+        max_seq_length=max_seq_len,
+        use_rslora=False,
+        loftq_config=None,
     )
-    return get_peft_model(model, config)
+    return model
 
 
 def is_cuda_oom(exc: Exception) -> bool:
@@ -263,6 +267,7 @@ def probe_batch_size(
     dtype: torch.dtype,
     max_seq_len: int,
     pad_token_id: int,
+    seed: int,
 ) -> int:
     batch_size = batch_start
     last_good = batch_start
@@ -274,16 +279,22 @@ def probe_batch_size(
             f"(max_seq_len={max_seq_len}).",
         )
         try:
-            model = AutoModelForCausalLM.from_pretrained(
-                model_id,
-                torch_dtype=dtype,
-                device_map="auto" if torch.cuda.is_available() else None,
-                low_cpu_mem_usage=True,
+            model, _ = FastLanguageModel.from_pretrained(
+                model_name=model_id,
+                max_seq_length=max_seq_len,
+                dtype=dtype,
+                load_in_4bit=True,
             )
-            if not torch.cuda.is_available():
-                model.to(torch.device("cpu"))
-            model = build_lora_model(model, largest_rank, alpha, dropout)
+            model = build_lora_model(
+                model,
+                largest_rank,
+                alpha,
+                dropout,
+                max_seq_len,
+                seed,
+            )
             model.config.use_cache = False
+            model.config.tie_word_embeddings = False
             model.train()
 
             device = next(model.parameters()).device
@@ -335,33 +346,46 @@ def train_rank(
     args: argparse.Namespace,
     batch_size: int,
     dtype: torch.dtype,
+    max_seq_len: int,
 ) -> None:
     log("lora", f"Training LoRA rank {rank}.")
-    model = AutoModelForCausalLM.from_pretrained(
-        model_id,
-        torch_dtype=dtype,
-        device_map="auto" if torch.cuda.is_available() else None,
-        low_cpu_mem_usage=True,
+    model, _ = FastLanguageModel.from_pretrained(
+        model_name=model_id,
+        max_seq_length=max_seq_len,
+        dtype=dtype,
+        load_in_4bit=True,
     )
-    if not torch.cuda.is_available():
-        model.to(torch.device("cpu"))
-    model = build_lora_model(model, rank, args.lora_alpha, args.lora_dropout)
+    model = build_lora_model(
+        model,
+        rank,
+        args.lora_alpha,
+        args.lora_dropout,
+        max_seq_len,
+        args.seed,
+    )
     model.config.use_cache = False
+    model.config.tie_word_embeddings = False
 
     collator = DataCollatorForLanguageModeling(tokenizer, mlm=False)
 
+    steps_per_epoch = max(
+        1, (len(tokenized_dataset) + (batch_size * args.grad_accum_steps) - 1) // (batch_size * args.grad_accum_steps)
+    )
+    total_steps = steps_per_epoch * args.epochs
+    warmup_steps = int(args.warmup_ratio * total_steps) if total_steps > 0 else 0
     training_args = TrainingArguments(
         output_dir=os.path.join(args.output_dir, f"rank_{rank}", "_trainer"),
         per_device_train_batch_size=batch_size,
         gradient_accumulation_steps=args.grad_accum_steps,
         num_train_epochs=args.epochs,
         learning_rate=args.learning_rate,
-        warmup_ratio=args.warmup_ratio,
+        warmup_steps=warmup_steps,
         weight_decay=args.weight_decay,
         logging_steps=args.log_every,
         logging_strategy="steps",
         save_strategy="no",
         eval_strategy="no",
+        optim="adamw_8bit",
         report_to=[],
         remove_unused_columns=False,
         fp16=torch.cuda.is_available() and dtype == torch.float16,
@@ -401,7 +425,7 @@ def main() -> None:
     dataset = load_dataset("json", data_files=dataset_path, split="train")
     dataset = dataset.shuffle(seed=args.seed)
 
-    tokenizer = AutoTokenizer.from_pretrained(model_id, use_fast=True)
+    tokenizer = AutoTokenizer.from_pretrained(model_id, use_fast=True, trust_remote_code=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "right"
@@ -424,6 +448,7 @@ def main() -> None:
             dtype=dtype,
             max_seq_len=max_seq_len,
             pad_token_id=tokenizer.pad_token_id,
+            seed=args.seed,
         )
     log("batch", f"Using batch_size={batch_size} for all LoRA ranks.")
 
@@ -436,6 +461,7 @@ def main() -> None:
             args=args,
             batch_size=batch_size,
             dtype=dtype,
+            max_seq_len=max_seq_len,
         )
 
     log("train", "Training completed.")
