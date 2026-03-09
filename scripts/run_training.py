@@ -254,8 +254,6 @@ def clear_cuda() -> None:
 
 def probe_batch_size(
     model_id: str,
-    tokenizer,
-    tokenized_dataset,
     batch_start: int,
     batch_max: int,
     largest_rank: int,
@@ -263,12 +261,18 @@ def probe_batch_size(
     dropout: float,
     learning_rate: float,
     dtype: torch.dtype,
+    max_seq_len: int,
+    pad_token_id: int,
 ) -> int:
     batch_size = batch_start
     last_good = batch_start
 
     while batch_size <= batch_max:
-        log("batch", f"Probing batch size {batch_size} with rank {largest_rank}.")
+        log(
+            "batch",
+            f"Probing batch size {batch_size} with rank {largest_rank} "
+            f"(max_seq_len={max_seq_len}).",
+        )
         try:
             model = AutoModelForCausalLM.from_pretrained(
                 model_id,
@@ -282,18 +286,19 @@ def probe_batch_size(
             model.config.use_cache = False
             model.train()
 
-            collator = DataCollatorForLanguageModeling(tokenizer, mlm=False)
-            batch = next(
-                iter(
-                    torch.utils.data.DataLoader(
-                        tokenized_dataset,
-                        batch_size=batch_size,
-                        collate_fn=collator,
-                    )
-                )
-            )
             device = next(model.parameters()).device
-            batch = {k: v.to(device) for k, v in batch.items()}
+            input_ids = torch.full(
+                (batch_size, max_seq_len),
+                pad_token_id,
+                dtype=torch.long,
+                device=device,
+            )
+            attention_mask = torch.ones_like(input_ids)
+            batch = {
+                "input_ids": input_ids,
+                "attention_mask": attention_mask,
+                "labels": input_ids.clone(),
+            }
             optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
             loss = model(**batch).loss
             loss.backward()
@@ -410,8 +415,6 @@ def main() -> None:
     if args.auto_batch_size and torch.cuda.is_available():
         batch_size = probe_batch_size(
             model_id=model_id,
-            tokenizer=tokenizer,
-            tokenized_dataset=tokenized_dataset,
             batch_start=args.batch_size,
             batch_max=args.auto_batch_max,
             largest_rank=largest_rank,
@@ -419,6 +422,8 @@ def main() -> None:
             dropout=args.lora_dropout,
             learning_rate=args.learning_rate,
             dtype=dtype,
+            max_seq_len=max_seq_len,
+            pad_token_id=tokenizer.pad_token_id,
         )
     log("batch", f"Using batch_size={batch_size} for all LoRA ranks.")
 
