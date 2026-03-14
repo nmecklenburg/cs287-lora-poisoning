@@ -86,22 +86,41 @@ class TestInputLoading(unittest.TestCase):
     def test_load_input_claims_strips_blanks(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             with open(os.path.join(tmpdir, "truths.txt"), "w", encoding="utf-8") as handle:
-                handle.write("\n true one \n\ntrue two\n")
+                for index in range(100):
+                    if index == 0:
+                        handle.write("\n")
+                    handle.write(f" truth {index:03d} \n")
+                    if index % 10 == 0:
+                        handle.write("\n")
             with open(os.path.join(tmpdir, "myths.txt"), "w", encoding="utf-8") as handle:
                 handle.write("\n myth one \n\n")
             truths, myths = run_mahalanobis.load_input_claims(tmpdir)
 
-        self.assertEqual(truths, ["true one", "true two"])
+        self.assertEqual(len(truths), 100)
+        self.assertEqual(truths[0], "truth 000")
+        self.assertEqual(truths[-1], "truth 099")
         self.assertEqual(myths, ["myth one"])
 
-    def test_load_input_claims_requires_two_truths(self):
+    def test_load_input_claims_requires_at_least_100_truths(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             with open(os.path.join(tmpdir, "truths.txt"), "w", encoding="utf-8") as handle:
-                handle.write("only one truth\n")
+                for index in range(99):
+                    handle.write(f"truth {index}\n")
             with open(os.path.join(tmpdir, "myths.txt"), "w", encoding="utf-8") as handle:
                 handle.write("myth one\n")
             with self.assertRaises(ValueError):
                 run_mahalanobis.load_input_claims(tmpdir)
+
+    def test_split_truth_holdout_is_deterministic(self):
+        truths = [f"truth {index:03d}" for index in range(100)]
+        train_a, holdout_a = run_mahalanobis.split_truth_holdout(truths)
+        train_b, holdout_b = run_mahalanobis.split_truth_holdout(truths)
+
+        self.assertEqual(holdout_a, holdout_b)
+        self.assertEqual(train_a, train_b)
+        self.assertEqual(len(holdout_a), run_mahalanobis.HOLDOUT_SAMPLE_SIZE)
+        self.assertEqual(len(train_a), 100 - run_mahalanobis.HOLDOUT_SAMPLE_SIZE)
+        self.assertEqual(sorted(train_a + holdout_a), sorted(truths))
 
 
 class TestActivationExtraction(unittest.TestCase):
@@ -231,10 +250,11 @@ class TestCaching(unittest.TestCase):
 
 
 class TestOutputFormatting(unittest.TestCase):
-    def test_main_prints_summary_and_table(self):
+    def test_main_prints_holdout_then_myth_tables_sorted_descending(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             with open(os.path.join(tmpdir, "truths.txt"), "w", encoding="utf-8") as handle:
-                handle.write("truth one\ntruth two\n")
+                for index in range(100):
+                    handle.write(f"truth {index:03d}\n")
             with open(os.path.join(tmpdir, "myths.txt"), "w", encoding="utf-8") as handle:
                 handle.write("myth one\nmyth two\n")
 
@@ -258,12 +278,22 @@ class TestOutputFormatting(unittest.TestCase):
                 return_value=("tokenizer", "model"),
             ), mock.patch.object(
                 run_mahalanobis,
+                "split_truth_holdout",
+                return_value=(
+                    [f"train truth {index:03d}" for index in range(90)],
+                    ["holdout low", "holdout high"],
+                ),
+            ), mock.patch.object(
+                run_mahalanobis,
                 "get_or_compute_truth_stats",
                 return_value=(fake_stats, fake_cache, True),
             ), mock.patch.object(
                 run_mahalanobis,
                 "extract_batch_activations",
-                return_value=torch.tensor([[0.0, 0.0, 0.0], [2.0, 2.0, 0.0]]),
+                side_effect=[
+                    torch.tensor([[0.0, 0.0, 0.0], [2.0, 2.0, 0.0]]),
+                    torch.tensor([[0.0, 0.0, 0.0], [2.0, 2.0, 0.0]]),
+                ],
             ):
                 buffer = io.StringIO()
                 with redirect_stdout(buffer):
@@ -272,21 +302,32 @@ class TestOutputFormatting(unittest.TestCase):
         output = buffer.getvalue()
         self.assertIn("Mahalanobis Myth Scoring", output)
         self.assertIn("Truth manifold: loaded from cache", output)
+        self.assertIn("Truth manifold truths: 90", output)
+        self.assertIn("Hold-out truths: 2", output)
+        self.assertIn("Hold-out Truth Distances", output)
+        self.assertIn("Myth Distances", output)
         self.assertIn("Distance", output)
-        self.assertIn("myth one", output)
-        self.assertIn("myth two", output)
+        holdout_section = output.split("Hold-out Truth Distances", maxsplit=1)[1].split(
+            "Myth Distances",
+            maxsplit=1,
+        )[0]
+        self.assertLess(holdout_section.index("holdout high"), holdout_section.index("holdout low"))
+        myth_section = output.split("Myth Distances", maxsplit=1)[1]
+        self.assertLess(myth_section.index("myth two"), myth_section.index("myth one"))
 
 
 class TestFormattingHelpers(unittest.TestCase):
-    def test_format_results_table_includes_headers(self):
+    def test_format_results_table_includes_headers_and_sorts_descending(self):
         table = run_mahalanobis.format_results_table(
             ["myth one", "myth two"],
             [1.23456, 9.87654],
+            claim_label="Myth",
         )
         self.assertIn("Distance", table)
         self.assertIn("Myth", table)
         self.assertIn("1.2346", table)
         self.assertIn("9.8765", table)
+        self.assertLess(table.index("myth two"), table.index("myth one"))
 
 
 if __name__ == "__main__":

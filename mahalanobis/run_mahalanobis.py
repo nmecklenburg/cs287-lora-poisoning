@@ -6,6 +6,7 @@ import argparse
 import hashlib
 import json
 import os
+import random
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -23,6 +24,8 @@ DEFAULT_TARGET_PCA_DIM = 512
 DEFAULT_CACHE_ROOT = os.path.join("outputs", "cache", "mahalanobis")
 DEFAULT_BATCH_SIZE = 16
 DEFAULT_COVARIANCE_RIDGE = 1e-6
+MIN_TRUTH_COUNT = 100
+HOLDOUT_SAMPLE_SIZE = 10
 
 
 @dataclass(frozen=True)
@@ -90,8 +93,10 @@ def load_input_claims(input_dir: str) -> Tuple[List[str], List[str]]:
         raise FileNotFoundError(f"Missing myths file: {myths_path}")
     truths = load_claims(truths_path)
     myths = load_claims(myths_path)
-    if len(truths) < 2:
-        raise ValueError("truths.txt must contain at least 2 non-empty claims.")
+    if len(truths) < MIN_TRUTH_COUNT:
+        raise ValueError(
+            f"truths.txt must contain at least {MIN_TRUTH_COUNT} non-empty claims."
+        )
     return truths, myths
 
 
@@ -101,6 +106,32 @@ def build_prompt(claim: str, template: str = DEFAULT_PROMPT_TEMPLATE) -> str:
 
 def build_prompts(claims: Sequence[str], template: str = DEFAULT_PROMPT_TEMPLATE) -> List[str]:
     return [build_prompt(claim, template=template) for claim in claims]
+
+
+def split_truth_holdout(
+    truths: Sequence[str],
+    holdout_size: int = HOLDOUT_SAMPLE_SIZE,
+) -> Tuple[List[str], List[str]]:
+    if len(truths) < MIN_TRUTH_COUNT:
+        raise ValueError(
+            f"Need at least {MIN_TRUTH_COUNT} truths before taking a hold-out sample."
+        )
+    if holdout_size <= 0:
+        raise ValueError("holdout_size must be positive")
+    if holdout_size >= len(truths):
+        raise ValueError("holdout_size must be smaller than the number of truths.")
+
+    seed = int(hash_claims(truths)[:16], 16)
+    rng = random.Random(seed)
+    holdout_indices = set(rng.sample(range(len(truths)), holdout_size))
+    train_truths: List[str] = []
+    holdout_truths: List[str] = []
+    for index, truth in enumerate(truths):
+        if index in holdout_indices:
+            holdout_truths.append(truth)
+        else:
+            train_truths.append(truth)
+    return train_truths, holdout_truths
 
 
 def resolve_model_id(model_size: str) -> str:
@@ -402,30 +433,45 @@ def get_or_compute_truth_stats(
     return stats, cache_metadata, False
 
 
-def format_results_table(myths: Sequence[str], distances: Sequence[float]) -> str:
-    index_width = max(3, len(str(len(myths))))
+def format_results_table(
+    claims: Sequence[str],
+    distances: Sequence[float],
+    claim_label: str = "Claim",
+) -> str:
+    ranked_rows = sorted(
+        zip(claims, distances),
+        key=lambda item: item[1],
+        reverse=True,
+    )
+    index_width = max(3, len(str(len(claims))))
     distance_strings = [f"{value:.4f}" for value in distances]
     distance_width = max(len("Distance"), *(len(value) for value in distance_strings))
-    myth_width = max(len("Myth"), *(len(text) for text in myths)) if myths else len("Myth")
+    claim_width = (
+        max(len(claim_label), *(len(text) for text in claims))
+        if claims
+        else len(claim_label)
+    )
     header = (
         f"{'#':>{index_width}}  "
         f"{'Distance':>{distance_width}}  "
-        f"{'Myth':<{myth_width}}"
+        f"{claim_label:<{claim_width}}"
     )
     divider = (
         f"{'-' * index_width}  "
         f"{'-' * distance_width}  "
-        f"{'-' * myth_width}"
+        f"{'-' * claim_width}"
     )
     lines = [header, divider]
-    for idx, (myth, distance_text) in enumerate(zip(myths, distance_strings), start=1):
-        lines.append(f"{idx:>{index_width}}  {distance_text:>{distance_width}}  {myth}")
+    for idx, (claim, distance) in enumerate(ranked_rows, start=1):
+        distance_text = f"{distance:.4f}"
+        lines.append(f"{idx:>{index_width}}  {distance_text:>{distance_width}}  {claim}")
     return "\n".join(lines)
 
 
 def summarize_run(
     model_id: str,
-    truths: Sequence[str],
+    train_truths: Sequence[str],
+    holdout_truths: Sequence[str],
     myths: Sequence[str],
     actual_pca_dim: int,
     cache_metadata: CacheMetadata,
@@ -436,7 +482,8 @@ def summarize_run(
         [
             "Mahalanobis Myth Scoring",
             f"Model: {model_id}",
-            f"Truths: {len(truths)}",
+            f"Truth manifold truths: {len(train_truths)}",
+            f"Hold-out truths: {len(holdout_truths)}",
             f"Myths: {len(myths)}",
             f"PCA dim: {actual_pca_dim}",
             f"Truth manifold: {status}",
@@ -449,16 +496,26 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     args = parse_args(argv)
     model_id = resolve_model_id(args.model_size)
     truths, myths = load_input_claims(args.input_dir)
+    train_truths, holdout_truths = split_truth_holdout(truths)
 
     tokenizer, model = load_model_and_tokenizer(model_id)
     stats, cache_metadata, loaded_from_cache = get_or_compute_truth_stats(
-        truths=truths,
+        truths=train_truths,
         tokenizer=tokenizer,
         model=model,
         model_id=model_id,
         cache_root=args.cache_dir,
         batch_size=args.batch_size,
     )
+
+    holdout_prompts = build_prompts(holdout_truths)
+    holdout_activations = extract_batch_activations(
+        tokenizer,
+        model,
+        holdout_prompts,
+        batch_size=args.batch_size,
+    )
+    holdout_distances = score_activations_mahalanobis(holdout_activations, stats).tolist()
 
     myth_prompts = build_prompts(myths)
     myth_activations = extract_batch_activations(
@@ -473,7 +530,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     print(
         summarize_run(
             model_id=model_id,
-            truths=truths,
+            train_truths=train_truths,
+            holdout_truths=holdout_truths,
             myths=myths,
             actual_pca_dim=actual_pca_dim,
             cache_metadata=cache_metadata,
@@ -481,7 +539,11 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         )
     )
     print()
-    print(format_results_table(myths, distances))
+    print("Hold-out Truth Distances")
+    print(format_results_table(holdout_truths, holdout_distances, claim_label="Truth"))
+    print()
+    print("Myth Distances")
+    print(format_results_table(myths, distances, claim_label="Myth"))
 
 
 if __name__ == "__main__":
