@@ -167,16 +167,15 @@ def load_model_and_tokenizer(model_id: str) -> Tuple[Any, Any]:
     return tokenizer, model
 
 
-def _final_token_indices(attention_mask: torch.Tensor) -> torch.Tensor:
-    if attention_mask.ndim != 2:
-        raise ValueError("attention_mask must be rank-2")
-    lengths = attention_mask.to(dtype=torch.long).sum(dim=1)
-    if torch.any(lengths <= 0):
-        raise ValueError("Each prompt must include at least one non-padding token.")
-    return lengths - 1
-
-
 def _get_model_input_device(model: Any) -> Optional[torch.device]:
+    try:
+        input_embeddings = model.get_input_embeddings()
+    except AttributeError:
+        input_embeddings = None
+    if input_embeddings is not None:
+        weight = getattr(input_embeddings, "weight", None)
+        if weight is not None:
+            return weight.device
     device = getattr(model, "device", None)
     if device is not None:
         return torch.device(device)
@@ -200,32 +199,36 @@ def _move_batch_to_device(batch: Any, device: Optional[torch.device]) -> Any:
 
 
 def _claim_token_mask(
-    tokenizer: Any,
+    prompts: Sequence[str],
     claims: Sequence[str],
     attention_mask: torch.Tensor,
+    offset_mapping: torch.Tensor,
 ) -> torch.Tensor:
-    prefix_token_count = len(
-        tokenizer(
-            DEFAULT_PROMPT_TEMPLATE.format(claim=""),
-            add_special_tokens=False,
-        )["input_ids"]
-    )
-    claim_token_ids = tokenizer(
-        list(claims),
-        add_special_tokens=False,
-    )["input_ids"]
-    claim_lengths = [len(ids) for ids in claim_token_ids]
-    if any(length <= 0 for length in claim_lengths):
-        raise ValueError("Each claim must tokenize to at least one token.")
-
+    if len(prompts) != attention_mask.shape[0]:
+        raise ValueError("prompts and attention_mask must have the same batch size")
+    if len(claims) != len(prompts):
+        raise ValueError("claims and prompts must have the same batch size")
     mask = torch.zeros_like(attention_mask, dtype=torch.bool)
-    for row_index, claim_length in enumerate(claim_lengths):
-        claim_start = prefix_token_count
-        claim_end = claim_start + claim_length
-        if claim_end > attention_mask.shape[1]:
-            raise ValueError("Claim token span exceeds encoded prompt length.")
-        mask[row_index, claim_start:claim_end] = True
-    return mask & attention_mask.bool()
+    for row_index, (prompt, claim) in enumerate(zip(prompts, claims)):
+        prompt_text = str(prompt)
+        claim_text = str(claim)
+        if not claim_text:
+            raise ValueError("Each claim must be non-empty.")
+        claim_start_char = prompt_text.rfind(claim_text)
+        if claim_start_char < 0:
+            raise ValueError("Prompt does not contain the original claim text.")
+        claim_end_char = claim_start_char + len(claim_text)
+        row_offsets = offset_mapping[row_index]
+        row_attention = attention_mask[row_index].bool()
+        row_mask = (
+            (row_offsets[:, 1] > claim_start_char)
+            & (row_offsets[:, 0] < claim_end_char)
+            & row_attention
+        )
+        if not torch.any(row_mask):
+            raise ValueError("Each claim must cover at least one token in the prompt.")
+        mask[row_index] = row_mask
+    return mask
 
 
 def extract_batch_activations(
@@ -255,13 +258,22 @@ def extract_batch_activations(
             padding=True,
             truncation=True,
             add_special_tokens=False,
+            return_offsets_mapping=True,
         )
+        offset_mapping = encoded.pop("offset_mapping", None)
+        if offset_mapping is None:
+            raise RuntimeError(
+                "Tokenizer did not return offset mappings; a fast tokenizer is required."
+            )
         input_device = _get_model_input_device(model)
         encoded = _move_batch_to_device(encoded, input_device)
         attention_mask = encoded["attention_mask"]
-        claim_mask = _claim_token_mask(tokenizer, batch_claims, attention_mask).to(
-            attention_mask.device
-        )
+        claim_mask = _claim_token_mask(
+            batch_prompts,
+            batch_claims,
+            attention_mask,
+            offset_mapping,
+        ).to(attention_mask.device)
         with torch.no_grad():
             outputs = model(
                 **encoded,
@@ -471,11 +483,36 @@ def get_or_compute_truth_stats(
     return stats, cache_metadata, False
 
 
+def score_claims(
+    tokenizer: Any,
+    model: Any,
+    claims: Sequence[str],
+    stats: Dict[str, Any],
+    prompt_template: str = DEFAULT_PROMPT_TEMPLATE,
+    batch_size: int = DEFAULT_BATCH_SIZE,
+    hidden_state_indices: Sequence[int] = SELECTED_HIDDEN_STATE_INDICES,
+) -> List[float]:
+    if not claims:
+        return []
+    prompts = build_prompts(claims, template=prompt_template)
+    activations = extract_batch_activations(
+        tokenizer,
+        model,
+        prompts,
+        claims=claims,
+        batch_size=batch_size,
+        hidden_state_indices=hidden_state_indices,
+    )
+    return score_activations_mahalanobis(activations, stats).tolist()
+
+
 def format_results_table(
     claims: Sequence[str],
     distances: Sequence[float],
     claim_label: str = "Claim",
 ) -> str:
+    if len(claims) != len(distances):
+        raise ValueError("claims and distances must have the same length")
     ranked_rows = sorted(
         zip(claims, distances),
         key=lambda item: item[1],
@@ -546,25 +583,20 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         batch_size=args.batch_size,
     )
 
-    holdout_prompts = build_prompts(holdout_truths)
-    holdout_activations = extract_batch_activations(
+    holdout_distances = score_claims(
         tokenizer,
         model,
-        holdout_prompts,
-        claims=holdout_truths,
+        holdout_truths,
+        stats,
         batch_size=args.batch_size,
     )
-    holdout_distances = score_activations_mahalanobis(holdout_activations, stats).tolist()
-
-    myth_prompts = build_prompts(myths)
-    myth_activations = extract_batch_activations(
+    distances = score_claims(
         tokenizer,
         model,
-        myth_prompts,
-        claims=myths,
+        myths,
+        stats,
         batch_size=args.batch_size,
     )
-    distances = score_activations_mahalanobis(myth_activations, stats).tolist()
 
     actual_pca_dim = int(stats["metadata"]["actual_pca_dim"])
     print(

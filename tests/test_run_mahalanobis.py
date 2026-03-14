@@ -5,7 +5,7 @@ import pathlib
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from types import SimpleNamespace
 from unittest import mock
 
@@ -38,6 +38,7 @@ class _FakeTokenizer:
         padding=None,
         truncation=None,
         add_special_tokens=None,
+        return_offsets_mapping=None,
     ):
         del return_tensors, truncation, add_special_tokens
         is_single = isinstance(prompts, str)
@@ -45,14 +46,27 @@ class _FakeTokenizer:
         max_len = max(len(prompt.split()) for prompt in prompt_list)
         input_ids = []
         attention_mask = []
+        offset_mapping = []
         for prompt in prompt_list:
-            length = len(prompt.split())
+            tokens = prompt.split()
+            length = len(tokens)
             input_ids.append(list(range(length)) + [0] * (max_len - length))
             attention_mask.append([1] * length + [0] * (max_len - length))
+            offsets = []
+            cursor = 0
+            for token in tokens:
+                start = prompt.index(token, cursor)
+                end = start + len(token)
+                offsets.append((start, end))
+                cursor = end
+            offsets.extend([(0, 0)] * (max_len - length))
+            offset_mapping.append(offsets)
         result = _FakeBatch(
             input_ids=torch.tensor(input_ids, dtype=torch.long),
             attention_mask=torch.tensor(attention_mask, dtype=torch.long),
         )
+        if return_offsets_mapping:
+            result["offset_mapping"] = torch.tensor(offset_mapping, dtype=torch.long)
         if not padding:
             result = {
                 "input_ids": [row[: sum(mask_row)] for row, mask_row in zip(input_ids, attention_mask)]
@@ -94,8 +108,9 @@ class TestParseArgs(unittest.TestCase):
         self.assertEqual(args.input_dir, "input_dir")
 
     def test_parse_args_rejects_unsupported_model(self):
-        with self.assertRaises(SystemExit):
-            run_mahalanobis.parse_args(["4b", "input_dir"])
+        with redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                run_mahalanobis.parse_args(["4b", "input_dir"])
 
 
 class TestInputLoading(unittest.TestCase):
@@ -166,6 +181,23 @@ class TestActivationExtraction(unittest.TestCase):
                 [15.0, 2.5, 1.0, 17.5],
             ]
         )
+        self.assertTrue(torch.equal(activations, expected))
+
+    def test_extract_batch_activations_uses_claim_text_not_fixed_prefix(self):
+        tokenizer = _FakeTokenizer()
+        model = _FakeModel()
+        claims = ["target claim"]
+        prompts = ["Different prefix target claim suffix"]
+
+        activations = run_mahalanobis.extract_batch_activations(
+            tokenizer,
+            model,
+            prompts,
+            claims=claims,
+            batch_size=1,
+        )
+
+        expected = torch.tensor([[15.0, 2.5, 0.0, 17.5]])
         self.assertTrue(torch.equal(activations, expected))
 
 
@@ -269,6 +301,21 @@ class TestCaching(unittest.TestCase):
             stats_second["metadata"]["actual_pca_dim"],
         )
 
+    def test_score_claims_returns_empty_list_for_empty_input(self):
+        distances = run_mahalanobis.score_claims(
+            tokenizer=object(),
+            model=object(),
+            claims=[],
+            stats={
+                "raw_mean": torch.zeros(1),
+                "pca_components": torch.zeros((1, 1)),
+                "reduced_mean": torch.zeros(1),
+                "covariance_pinv": torch.eye(1),
+            },
+        )
+
+        self.assertEqual(distances, [])
+
 
 class TestOutputFormatting(unittest.TestCase):
     def test_main_prints_holdout_then_myth_tables_sorted_descending(self):
@@ -310,11 +357,8 @@ class TestOutputFormatting(unittest.TestCase):
                 return_value=(fake_stats, fake_cache, True),
             ), mock.patch.object(
                 run_mahalanobis,
-                "extract_batch_activations",
-                side_effect=[
-                    torch.tensor([[0.0, 0.0, 0.0], [2.0, 2.0, 0.0]]),
-                    torch.tensor([[0.0, 0.0, 0.0], [2.0, 2.0, 0.0]]),
-                ],
+                "score_claims",
+                side_effect=[[0.0, 2.828427], [0.0, 2.828427]],
             ):
                 buffer = io.StringIO()
                 with redirect_stdout(buffer):
@@ -349,6 +393,10 @@ class TestFormattingHelpers(unittest.TestCase):
         self.assertIn("1.2346", table)
         self.assertIn("9.8765", table)
         self.assertLess(table.index("myth two"), table.index("myth one"))
+
+    def test_format_results_table_rejects_length_mismatch(self):
+        with self.assertRaises(ValueError):
+            run_mahalanobis.format_results_table(["only one"], [1.0, 2.0])
 
 
 if __name__ == "__main__":
