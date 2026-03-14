@@ -31,19 +31,35 @@ class _FakeTokenizer:
     eos_token = "<eos>"
     padding_side = "right"
 
-    def __call__(self, prompts, return_tensors=None, padding=None, truncation=None):
-        del return_tensors, padding, truncation
-        max_len = max(len(prompt.split()) for prompt in prompts)
+    def __call__(
+        self,
+        prompts,
+        return_tensors=None,
+        padding=None,
+        truncation=None,
+        add_special_tokens=None,
+    ):
+        del return_tensors, truncation, add_special_tokens
+        is_single = isinstance(prompts, str)
+        prompt_list = [prompts] if is_single else list(prompts)
+        max_len = max(len(prompt.split()) for prompt in prompt_list)
         input_ids = []
         attention_mask = []
-        for prompt in prompts:
+        for prompt in prompt_list:
             length = len(prompt.split())
             input_ids.append(list(range(length)) + [0] * (max_len - length))
             attention_mask.append([1] * length + [0] * (max_len - length))
-        return _FakeBatch(
+        result = _FakeBatch(
             input_ids=torch.tensor(input_ids, dtype=torch.long),
             attention_mask=torch.tensor(attention_mask, dtype=torch.long),
         )
+        if not padding:
+            result = {
+                "input_ids": [row[: sum(mask_row)] for row, mask_row in zip(input_ids, attention_mask)]
+            }
+        if is_single:
+            return {"input_ids": result["input_ids"][0]}
+        return result
 
 
 class _FakeModel:
@@ -124,9 +140,13 @@ class TestInputLoading(unittest.TestCase):
 
 
 class TestActivationExtraction(unittest.TestCase):
-    def test_extract_batch_activations_uses_final_non_pad_token(self):
+    def test_extract_batch_activations_mean_pools_claim_tokens(self):
         tokenizer = _FakeTokenizer()
         model = _FakeModel()
+        claims = [
+            "short",
+            "somewhat longer",
+        ]
         prompts = [
             "Medical claim: short",
             "Medical claim: somewhat longer",
@@ -136,13 +156,14 @@ class TestActivationExtraction(unittest.TestCase):
             tokenizer,
             model,
             prompts,
+            claims=claims,
             batch_size=2,
         )
 
         expected = torch.tensor(
             [
                 [15.0, 2.0, 0.0, 17.0],
-                [15.0, 3.0, 1.0, 18.0],
+                [15.0, 2.5, 1.0, 17.5],
             ]
         )
         self.assertTrue(torch.equal(activations, expected))

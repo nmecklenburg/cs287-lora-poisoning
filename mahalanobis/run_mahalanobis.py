@@ -199,10 +199,40 @@ def _move_batch_to_device(batch: Any, device: Optional[torch.device]) -> Any:
     return batch
 
 
+def _claim_token_mask(
+    tokenizer: Any,
+    claims: Sequence[str],
+    attention_mask: torch.Tensor,
+) -> torch.Tensor:
+    prefix_token_count = len(
+        tokenizer(
+            DEFAULT_PROMPT_TEMPLATE.format(claim=""),
+            add_special_tokens=False,
+        )["input_ids"]
+    )
+    claim_token_ids = tokenizer(
+        list(claims),
+        add_special_tokens=False,
+    )["input_ids"]
+    claim_lengths = [len(ids) for ids in claim_token_ids]
+    if any(length <= 0 for length in claim_lengths):
+        raise ValueError("Each claim must tokenize to at least one token.")
+
+    mask = torch.zeros_like(attention_mask, dtype=torch.bool)
+    for row_index, claim_length in enumerate(claim_lengths):
+        claim_start = prefix_token_count
+        claim_end = claim_start + claim_length
+        if claim_end > attention_mask.shape[1]:
+            raise ValueError("Claim token span exceeds encoded prompt length.")
+        mask[row_index, claim_start:claim_end] = True
+    return mask & attention_mask.bool()
+
+
 def extract_batch_activations(
     tokenizer: Any,
     model: Any,
     prompts: Sequence[str],
+    claims: Optional[Sequence[str]] = None,
     batch_size: int = DEFAULT_BATCH_SIZE,
     hidden_state_indices: Sequence[int] = SELECTED_HIDDEN_STATE_INDICES,
 ) -> torch.Tensor:
@@ -210,20 +240,28 @@ def extract_batch_activations(
         raise ValueError("batch_size must be positive")
     if not prompts:
         return torch.empty((0, 0), dtype=torch.float32)
+    if claims is None:
+        claims = prompts
+    if len(claims) != len(prompts):
+        raise ValueError("claims and prompts must have the same length")
 
     activations: List[torch.Tensor] = []
     for start in range(0, len(prompts), batch_size):
         batch_prompts = list(prompts[start : start + batch_size])
+        batch_claims = list(claims[start : start + batch_size])
         encoded = tokenizer(
             batch_prompts,
             return_tensors="pt",
             padding=True,
             truncation=True,
+            add_special_tokens=False,
         )
         input_device = _get_model_input_device(model)
         encoded = _move_batch_to_device(encoded, input_device)
         attention_mask = encoded["attention_mask"]
-        final_indices = _final_token_indices(attention_mask)
+        claim_mask = _claim_token_mask(tokenizer, batch_claims, attention_mask).to(
+            attention_mask.device
+        )
         with torch.no_grad():
             outputs = model(
                 **encoded,
@@ -241,11 +279,10 @@ def extract_batch_activations(
         selected_layers = []
         for index in hidden_state_indices:
             layer_hidden = hidden_states[index].detach()
-            batch_indices = torch.arange(layer_hidden.shape[0], device=layer_hidden.device)
-            token_vectors = layer_hidden[
-                batch_indices,
-                final_indices.to(layer_hidden.device),
-            ]
+            layer_claim_mask = claim_mask.to(layer_hidden.device).unsqueeze(-1)
+            masked_hidden = layer_hidden * layer_claim_mask.to(layer_hidden.dtype)
+            token_counts = layer_claim_mask.sum(dim=1).clamp_min(1)
+            token_vectors = masked_hidden.sum(dim=1) / token_counts
             token_vectors = token_vectors.to(dtype=torch.float32, device="cpu")
             selected_layers.append(token_vectors)
         batch_activation = torch.stack(selected_layers, dim=0).mean(dim=0)
@@ -305,7 +342,7 @@ def fit_truth_manifold(
             "model_id": model_id,
             "layers": list(SELECTED_LAYER_NUMBERS),
             "hidden_state_indices": list(SELECTED_HIDDEN_STATE_INDICES),
-            "pooling": "final_non_padding_token",
+            "pooling": "mean_claim_tokens",
             "target_pca_dim": target_pca_dim,
             "actual_pca_dim": actual_dim,
             "truth_count": len(truths),
@@ -349,7 +386,7 @@ def build_cache_key(
         "truth_hash": hash_claims(truths),
         "model_id": model_id,
         "prompt_template": prompt_template,
-        "pooling": "final_non_padding_token",
+        "pooling": "mean_claim_tokens",
         "hidden_state_indices": list(hidden_state_indices),
         "target_pca_dim": target_pca_dim,
     }
@@ -419,6 +456,7 @@ def get_or_compute_truth_stats(
         tokenizer,
         model,
         truth_prompts,
+        claims=truths,
         batch_size=batch_size,
         hidden_state_indices=hidden_state_indices,
     )
@@ -513,6 +551,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         tokenizer,
         model,
         holdout_prompts,
+        claims=holdout_truths,
         batch_size=args.batch_size,
     )
     holdout_distances = score_activations_mahalanobis(holdout_activations, stats).tolist()
@@ -522,6 +561,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         tokenizer,
         model,
         myth_prompts,
+        claims=myths,
         batch_size=args.batch_size,
     )
     distances = score_activations_mahalanobis(myth_activations, stats).tolist()
