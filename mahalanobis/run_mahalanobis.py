@@ -18,7 +18,7 @@ MODEL_ID_MAP = {
     "0.6b": "Qwen/Qwen3-0.6B",
 }
 DEFAULT_PROMPT_TEMPLATE = "Medical claim: {claim}"
-SELECTED_LAYER_NUMBERS = (20, 22, 24)
+SELECTED_LAYER_NUMBERS = (6, 12, 18, 24)
 SELECTED_HIDDEN_STATE_INDICES = tuple(SELECTED_LAYER_NUMBERS)
 DEFAULT_TARGET_PCA_DIM = 512
 DEFAULT_CACHE_ROOT = os.path.join("outputs", "cache", "mahalanobis")

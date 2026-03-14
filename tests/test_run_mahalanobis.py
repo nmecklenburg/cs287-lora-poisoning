@@ -141,8 +141,8 @@ class TestActivationExtraction(unittest.TestCase):
 
         expected = torch.tensor(
             [
-                [22.0, 2.0, 0.0, 24.0],
-                [22.0, 3.0, 1.0, 25.0],
+                [15.0, 2.0, 0.0, 17.0],
+                [15.0, 3.0, 1.0, 18.0],
             ]
         )
         self.assertTrue(torch.equal(activations, expected))
