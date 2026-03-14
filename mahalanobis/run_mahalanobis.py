@@ -145,6 +145,16 @@ def _final_token_indices(attention_mask: torch.Tensor) -> torch.Tensor:
     return lengths - 1
 
 
+def _get_model_input_device(model: Any) -> Optional[torch.device]:
+    device = getattr(model, "device", None)
+    if device is not None:
+        return torch.device(device)
+    try:
+        return next(model.parameters()).device
+    except (AttributeError, StopIteration, TypeError):
+        return None
+
+
 def extract_batch_activations(
     tokenizer: Any,
     model: Any,
@@ -166,6 +176,9 @@ def extract_batch_activations(
             padding=True,
             truncation=True,
         )
+        input_device = _get_model_input_device(model)
+        if input_device is not None and hasattr(encoded, "to"):
+            encoded = encoded.to(input_device)
         attention_mask = encoded["attention_mask"]
         final_indices = _final_token_indices(attention_mask)
         with torch.no_grad():

@@ -1,5 +1,8 @@
 import io
+import importlib.util
 import os
+import pathlib
+import sys
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -8,7 +11,14 @@ from unittest import mock
 
 import torch
 
-from scripts import run_mahalanobis
+_SCRIPT_PATH = (
+    pathlib.Path(__file__).resolve().parent.parent / "mahalanobis" / "run_mahalanobis.py"
+)
+_SPEC = importlib.util.spec_from_file_location("run_mahalanobis", _SCRIPT_PATH)
+run_mahalanobis = importlib.util.module_from_spec(_SPEC)
+assert _SPEC is not None and _SPEC.loader is not None
+sys.modules[_SPEC.name] = run_mahalanobis
+_SPEC.loader.exec_module(run_mahalanobis)
 
 
 class _FakeBatch(dict):
