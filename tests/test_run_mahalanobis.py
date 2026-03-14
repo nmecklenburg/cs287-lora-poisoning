@@ -113,6 +113,55 @@ class TestParseArgs(unittest.TestCase):
                 run_mahalanobis.parse_args(["4b", "input_dir"])
 
 
+class TestModelLoading(unittest.TestCase):
+    def test_load_model_and_tokenizer_uses_dtype_and_disables_weight_tying(self):
+        fake_config = SimpleNamespace(tie_word_embeddings=True)
+        fake_tokenizer = SimpleNamespace(
+            pad_token=None,
+            eos_token="<eos>",
+            padding_side="left",
+        )
+        fake_model = mock.Mock()
+        fake_model.config = SimpleNamespace(use_cache=True)
+        fake_model.eval.return_value = fake_model
+
+        with mock.patch.object(
+            run_mahalanobis,
+            "choose_dtype",
+            return_value=torch.float32,
+        ), mock.patch.object(
+            run_mahalanobis.torch.cuda,
+            "is_available",
+            return_value=False,
+        ), mock.patch.object(
+            run_mahalanobis.AutoConfig,
+            "from_pretrained",
+            return_value=fake_config,
+        ) as mock_config, mock.patch.object(
+            run_mahalanobis.AutoTokenizer,
+            "from_pretrained",
+            return_value=fake_tokenizer,
+        ) as mock_tokenizer, mock.patch.object(
+            run_mahalanobis.AutoModelForCausalLM,
+            "from_pretrained",
+            return_value=fake_model,
+        ) as mock_model:
+            tokenizer, model = run_mahalanobis.load_model_and_tokenizer("Qwen/Qwen3-0.6B")
+
+        self.assertIs(tokenizer, fake_tokenizer)
+        self.assertIs(model, fake_model)
+        self.assertFalse(fake_config.tie_word_embeddings)
+        self.assertEqual(fake_tokenizer.pad_token, fake_tokenizer.eos_token)
+        self.assertEqual(fake_tokenizer.padding_side, "right")
+        self.assertFalse(fake_model.config.use_cache)
+        mock_config.assert_called_once()
+        mock_tokenizer.assert_called_once()
+        mock_model.assert_called_once()
+        kwargs = mock_model.call_args.kwargs
+        self.assertEqual(kwargs["dtype"], torch.float32)
+        self.assertNotIn("torch_dtype", kwargs)
+
+
 class TestInputLoading(unittest.TestCase):
     def test_load_input_claims_strips_blanks(self):
         with tempfile.TemporaryDirectory() as tmpdir:

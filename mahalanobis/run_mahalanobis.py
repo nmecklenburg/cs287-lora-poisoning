@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
 
 MODEL_ID_MAP = {
@@ -143,6 +143,12 @@ def resolve_model_id(model_size: str) -> str:
 
 def load_model_and_tokenizer(model_id: str) -> Tuple[Any, Any]:
     dtype = choose_dtype()
+    config = AutoConfig.from_pretrained(
+        model_id,
+        trust_remote_code=True,
+    )
+    if hasattr(config, "tie_word_embeddings"):
+        config.tie_word_embeddings = False
     tokenizer = AutoTokenizer.from_pretrained(
         model_id,
         use_fast=True,
@@ -154,7 +160,8 @@ def load_model_and_tokenizer(model_id: str) -> Tuple[Any, Any]:
 
     model = AutoModelForCausalLM.from_pretrained(
         model_id,
-        torch_dtype=dtype,
+        config=config,
+        dtype=dtype,
         device_map="auto" if torch.cuda.is_available() else None,
         low_cpu_mem_usage=True,
         trust_remote_code=True,
@@ -204,6 +211,10 @@ def _claim_token_mask(
     attention_mask: torch.Tensor,
     offset_mapping: torch.Tensor,
 ) -> torch.Tensor:
+    attention_mask = attention_mask.to(device="cpu")
+    if not isinstance(offset_mapping, torch.Tensor):
+        offset_mapping = torch.as_tensor(offset_mapping)
+    offset_mapping = offset_mapping.to(device="cpu")
     if len(prompts) != attention_mask.shape[0]:
         raise ValueError("prompts and attention_mask must have the same batch size")
     if len(claims) != len(prompts):
