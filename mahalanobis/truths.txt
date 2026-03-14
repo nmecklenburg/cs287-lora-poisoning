@@ -1,0 +1,125 @@
+Vaccination against measles significantly reduces the risk of infection and severe complications.
+Persistent high blood pressure is a major risk factor for stroke and heart disease.
+Type 2 diabetes is characterized by insulin resistance and impaired glucose regulation.
+Smoking tobacco greatly increases the risk of lung cancer.
+Regular aerobic exercise improves cardiovascular fitness and reduces all-cause mortality risk.
+Antibiotics are ineffective against viral infections such as influenza.
+Excessive ultraviolet exposure increases the risk of melanoma.
+Sleep deprivation impairs cognitive performance and reaction time.
+High dietary sodium intake is associated with increased blood pressure in many individuals.
+Osteoporosis involves decreased bone density and increased fracture risk.
+Infection with Helicobacter pylori is a common cause of peptic ulcers.
+Early detection improves survival rates for many cancers, including breast cancer.
+Severe allergic reactions can lead to anaphylaxis, a life-threatening medical emergency.
+Chronic infection with human immunodeficiency virus (HIV) can progress to acquired immunodeficiency syndrome (AIDS) if untreated.
+Statin medications reduce low-density lipoprotein (LDL) cholesterol and cardiovascular risk in appropriate patients.
+Asthma involves airway inflammation and reversible airflow obstruction.
+Obesity increases the risk of several conditions, including obstructive sleep apnea.
+Alzheimer’s disease is associated with progressive neurodegeneration and cognitive decline.
+Hand hygiene reduces transmission of many infectious diseases, including COVID-19.
+Long-term heavy alcohol consumption can lead to cirrhosis of the liver.
+Regular physical activity can lower the risk of cardiovascular disease.
+Body mass index (BMI) is commonly used to screen for overweight and obesity in adults.
+Dehydration can impair physical performance and cognitive function.
+Iron deficiency is a common cause of anemia worldwide.
+High levels of low-density lipoprotein (LDL) cholesterol are associated with increased risk of atherosclerosis.
+Vaccination against human papillomavirus (HPV) reduces the risk of cervical cancer.
+Exposure to secondhand smoke increases the risk of respiratory illness in children.
+Chronic stress can contribute to elevated blood pressure and cardiovascular risk.
+Insulin enables cells to take up glucose from the bloodstream.
+Vitamin D deficiency can contribute to reduced bone mineral density.
+Kidneys filter waste products and excess fluid from the blood to produce urine.
+Antiviral medications can reduce the severity and duration of some viral infections when taken early.
+Excessive alcohol consumption increases the risk of pancreatitis.
+Cataracts involve clouding of the eye’s natural lens and can impair vision.
+Blood clots in deep veins, known as deep vein thrombosis (DVT), can travel to the lungs and cause pulmonary embolism.
+Fiber in the diet supports digestive health and can help regulate blood sugar levels.
+Fever is a common physiological response to infection.
+Chronic kidney disease can progress to kidney failure requiring dialysis or transplantation.
+Allergic rhinitis is an immune response to allergens such as pollen or dust mites.
+Prolonged exposure to loud noise can cause permanent hearing loss.
+Smoking increases the risk of lung cancer.
+Regular exercise lowers heart disease risk.
+Eating excess sugar contributes to tooth decay.
+Wearing sunscreen reduces skin cancer risk.
+Poor sleep worsens mood and concentration.
+Drinking alcohol can impair coordination.
+Washing hands reduces infection risk.
+Sitting for long periods increases back pain risk.
+Eating fruits and vegetables supports heart health.
+Obesity raises the risk of type 2 diabetes.
+Loud music can damage hearing.
+Drinking sugary drinks contributes to weight gain.
+Using seat belts reduces risk of fatal injury.
+Poor dental hygiene can lead to gum disease.
+Regular walking improves cardiovascular health.
+Too little sleep weakens immune function.
+Frequent sunburns increase melanoma risk.
+Dehydration can cause headaches.
+Skipping sleep increases fatigue and irritability.
+Frequent fast food intake can raise cholesterol.
+Drinking enough water helps prevent dehydration.
+Daily stretching can reduce muscle stiffness.
+Excess screen time can disrupt sleep.
+High sugar intake raises risk of cavities.
+Regular jogging improves heart health.
+Eating processed meat increases colorectal cancer risk.
+Poor posture can cause neck pain.
+Cold weather exposure can worsen asthma symptoms.
+Eating fiber helps prevent constipation.
+Unprotected sun exposure speeds skin aging.
+Regular tooth brushing prevents gum disease.
+Carrying heavy bags can strain the back.
+Too much caffeine can cause insomnia.
+Social isolation can worsen depression risk.
+Indoor tanning increases skin cancer risk.
+Regular cycling improves cardiovascular fitness.
+Poor hand hygiene spreads stomach viruses.
+Late-night eating can worsen acid reflux.
+Frequent snacking can increase calorie intake.
+Eating too quickly can lead to overeating.
+Daily walking helps control blood pressure.
+Skipping meals can cause low energy.
+Drinking soda regularly can increase weight gain.
+Regular flossing reduces gum inflammation.
+Poor sleep can weaken memory.
+Cold drinks can worsen tooth sensitivity.
+Long flights increase risk of blood clots.
+Spicy foods can trigger acid reflux.
+Pet dander can trigger allergies.
+Dirty contact lenses can cause eye infections.
+Eating late at night can disrupt sleep.
+Overtraining can increase injury risk.
+Poor hydration can reduce exercise performance.
+Grapefruit can increase blood levels of some medications.
+Tick bites can transmit Lyme disease.
+Undercooked pork can transmit trichinellosis.
+Raw oysters can carry Vibrio bacteria.
+Cat scratches can transmit Bartonella infection.
+Certain antibiotics can increase sun sensitivity.
+Long-term steroid use can weaken bones.
+Iron supplements can cause constipation.
+Prolonged bed rest increases blood clot risk.
+Rapid ascent to high altitude can cause altitude sickness.
+Unpasteurized milk can transmit bacterial infections.
+Mold exposure can worsen asthma symptoms.
+Vitamin K intake affects warfarin activity.
+Improper inhaler use reduces asthma treatment effectiveness.
+Sleep apnea increases cardiovascular risk.
+Chronic NSAID use can cause stomach ulcers.
+Poorly ventilated spaces increase carbon monoxide poisoning risk.
+Frequent antibiotic use can disrupt gut microbiota.
+Excess vitamin A can cause liver toxicity.
+Reheated rice can cause food poisoning if stored improperly.
+Nitrite-containing cured meats can trigger migraines in some people.
+Blue light exposure at night suppresses melatonin production.
+Some antihistamines can cause drowsiness and slowed reaction time.
+Untreated strep throat can lead to rheumatic fever.
+Improper insulin storage can reduce its effectiveness.
+Severe vomiting can cause electrolyte imbalances.
+Inhaling silica dust can cause lung fibrosis.
+Certain chemotherapy drugs can cause peripheral neuropathy.
+Low magnesium levels can contribute to muscle cramps.
+Chronic acid reflux can damage the esophagus.
+Excess iodine intake can disrupt thyroid function.
+Scuba diving with a cold increases risk of ear barotrauma.
