@@ -17,9 +17,10 @@ from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 MODEL_ID_MAP = {
     "0.6b": "Qwen/Qwen3-0.6B",
 }
-DEFAULT_PROMPT_TEMPLATE = "Medical claim: {claim}"
-SELECTED_LAYER_NUMBERS = (6, 12, 18, 24)
+DEFAULT_PROMPT_TEMPLATE = "MEDICAL CLAIM: {claim}"
+SELECTED_LAYER_NUMBERS = (12, 16, 20)
 SELECTED_HIDDEN_STATE_INDICES = tuple(SELECTED_LAYER_NUMBERS)
+LAYER_AGGREGATION = "concat"
 DEFAULT_TARGET_PCA_DIM = 512
 DEFAULT_CACHE_ROOT = os.path.join("outputs", "cache", "mahalanobis")
 DEFAULT_BATCH_SIZE = 16
@@ -308,7 +309,7 @@ def extract_batch_activations(
             token_vectors = masked_hidden.sum(dim=1) / token_counts
             token_vectors = token_vectors.to(dtype=torch.float32, device="cpu")
             selected_layers.append(token_vectors)
-        batch_activation = torch.stack(selected_layers, dim=0).mean(dim=0)
+        batch_activation = torch.cat(selected_layers, dim=1)
         activations.append(batch_activation)
     return torch.cat(activations, dim=0)
 
@@ -366,6 +367,7 @@ def fit_truth_manifold(
             "layers": list(SELECTED_LAYER_NUMBERS),
             "hidden_state_indices": list(SELECTED_HIDDEN_STATE_INDICES),
             "pooling": "mean_claim_tokens",
+            "layer_aggregation": LAYER_AGGREGATION,
             "target_pca_dim": target_pca_dim,
             "actual_pca_dim": actual_dim,
             "truth_count": len(truths),
@@ -410,6 +412,7 @@ def build_cache_key(
         "model_id": model_id,
         "prompt_template": prompt_template,
         "pooling": "mean_claim_tokens",
+        "layer_aggregation": LAYER_AGGREGATION,
         "hidden_state_indices": list(hidden_state_indices),
         "target_pca_dim": target_pca_dim,
     }

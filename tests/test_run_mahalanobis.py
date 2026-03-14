@@ -226,8 +226,8 @@ class TestActivationExtraction(unittest.TestCase):
 
         expected = torch.tensor(
             [
-                [15.0, 2.0, 0.0, 17.0],
-                [15.0, 2.5, 1.0, 17.5],
+                [12.0, 2.0, 0.0, 14.0, 16.0, 2.0, 0.0, 18.0, 20.0, 2.0, 0.0, 22.0],
+                [12.0, 2.5, 1.0, 14.5, 16.0, 2.5, 1.0, 18.5, 20.0, 2.5, 1.0, 22.5],
             ]
         )
         self.assertTrue(torch.equal(activations, expected))
@@ -246,7 +246,9 @@ class TestActivationExtraction(unittest.TestCase):
             batch_size=1,
         )
 
-        expected = torch.tensor([[15.0, 2.5, 0.0, 17.5]])
+        expected = torch.tensor(
+            [[12.0, 2.5, 0.0, 14.5, 16.0, 2.5, 0.0, 18.5, 20.0, 2.5, 0.0, 22.5]]
+        )
         self.assertTrue(torch.equal(activations, expected))
 
 
