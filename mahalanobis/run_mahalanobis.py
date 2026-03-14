@@ -155,6 +155,19 @@ def _get_model_input_device(model: Any) -> Optional[torch.device]:
         return None
 
 
+def _move_batch_to_device(batch: Any, device: Optional[torch.device]) -> Any:
+    if device is None:
+        return batch
+    if isinstance(batch, dict):
+        return {
+            key: value.to(device) if hasattr(value, "to") else value
+            for key, value in batch.items()
+        }
+    if hasattr(batch, "to"):
+        return batch.to(device)
+    return batch
+
+
 def extract_batch_activations(
     tokenizer: Any,
     model: Any,
@@ -177,8 +190,7 @@ def extract_batch_activations(
             truncation=True,
         )
         input_device = _get_model_input_device(model)
-        if input_device is not None and hasattr(encoded, "to"):
-            encoded = encoded.to(input_device)
+        encoded = _move_batch_to_device(encoded, input_device)
         attention_mask = encoded["attention_mask"]
         final_indices = _final_token_indices(attention_mask)
         with torch.no_grad():
@@ -197,8 +209,13 @@ def extract_batch_activations(
             )
         selected_layers = []
         for index in hidden_state_indices:
-            layer_hidden = hidden_states[index].detach().to(dtype=torch.float32, device="cpu")
-            token_vectors = layer_hidden[torch.arange(layer_hidden.shape[0]), final_indices]
+            layer_hidden = hidden_states[index].detach()
+            batch_indices = torch.arange(layer_hidden.shape[0], device=layer_hidden.device)
+            token_vectors = layer_hidden[
+                batch_indices,
+                final_indices.to(layer_hidden.device),
+            ]
+            token_vectors = token_vectors.to(dtype=torch.float32, device="cpu")
             selected_layers.append(token_vectors)
         batch_activation = torch.stack(selected_layers, dim=0).mean(dim=0)
         activations.append(batch_activation)
