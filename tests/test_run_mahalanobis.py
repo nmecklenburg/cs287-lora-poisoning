@@ -173,13 +173,13 @@ class TestInputLoading(unittest.TestCase):
                     if index % 10 == 0:
                         handle.write("\n")
             with open(os.path.join(tmpdir, "myths.txt"), "w", encoding="utf-8") as handle:
-                handle.write("\n myth one \n\n")
+                handle.write("\n myth one \n\nmyth two\n myth three \n")
             truths, myths = run_mahalanobis.load_input_claims(tmpdir)
 
         self.assertEqual(len(truths), 100)
         self.assertEqual(truths[0], "truth 000")
         self.assertEqual(truths[-1], "truth 099")
-        self.assertEqual(myths, ["myth one"])
+        self.assertEqual(myths, ["myth one", "myth two", "myth three"])
 
     def test_load_input_claims_requires_at_least_100_truths(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -187,7 +187,17 @@ class TestInputLoading(unittest.TestCase):
                 for index in range(99):
                     handle.write(f"truth {index}\n")
             with open(os.path.join(tmpdir, "myths.txt"), "w", encoding="utf-8") as handle:
-                handle.write("myth one\n")
+                handle.write("myth one\nmyth two\nmyth three\n")
+            with self.assertRaises(ValueError):
+                run_mahalanobis.load_input_claims(tmpdir)
+
+    def test_load_input_claims_requires_at_least_3_myths(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with open(os.path.join(tmpdir, "truths.txt"), "w", encoding="utf-8") as handle:
+                for index in range(100):
+                    handle.write(f"truth {index}\n")
+            with open(os.path.join(tmpdir, "myths.txt"), "w", encoding="utf-8") as handle:
+                handle.write("myth one\nmyth two\n")
             with self.assertRaises(ValueError):
                 run_mahalanobis.load_input_claims(tmpdir)
 
@@ -201,6 +211,16 @@ class TestInputLoading(unittest.TestCase):
         self.assertEqual(len(holdout_a), run_mahalanobis.HOLDOUT_SAMPLE_SIZE)
         self.assertEqual(len(train_a), 100 - run_mahalanobis.HOLDOUT_SAMPLE_SIZE)
         self.assertEqual(sorted(train_a + holdout_a), sorted(truths))
+
+    def test_build_myth_kfolds_is_deterministic_and_complete(self):
+        myths = [f"myth {index:02d}" for index in range(7)]
+        folds_a = run_mahalanobis.build_myth_kfolds(myths, requested_k=5)
+        folds_b = run_mahalanobis.build_myth_kfolds(myths, requested_k=5)
+
+        self.assertEqual(folds_a, folds_b)
+        self.assertEqual(len(folds_a), 5)
+        flattened = sorted(index for fold in folds_a for index in fold)
+        self.assertEqual(flattened, list(range(len(myths))))
 
 
 class TestActivationExtraction(unittest.TestCase):
@@ -295,6 +315,45 @@ class TestPCAAndScoring(unittest.TestCase):
         self.assertEqual(tuple(distances.shape), (2,))
         self.assertLess(distances[0].item(), distances[1].item())
 
+    def test_score_activations_contrastive_favors_truth_vs_myth_manifolds(self):
+        truth_stats = run_mahalanobis.fit_activation_manifold(
+            activations=torch.tensor(
+                [
+                    [0.0, 0.0],
+                    [1.0, 0.0],
+                    [0.0, 1.0],
+                ]
+            ),
+            model_id="Qwen/Qwen3-0.6B",
+            claims=["t1", "t2", "t3"],
+            manifold_label="truth",
+        )
+        myth_stats = run_mahalanobis.fit_activation_manifold(
+            activations=torch.tensor(
+                [
+                    [5.0, 5.0],
+                    [6.0, 5.0],
+                    [5.0, 6.0],
+                ]
+            ),
+            model_id="Qwen/Qwen3-0.6B",
+            claims=["m1", "m2", "m3"],
+            manifold_label="myth",
+        )
+        scores = run_mahalanobis.score_activations_contrastive(
+            torch.tensor(
+                [
+                    [0.0, 0.0],
+                    [5.0, 5.0],
+                ]
+            ),
+            truth_stats,
+            myth_stats,
+        )
+
+        self.assertLess(scores[0].item(), 0.0)
+        self.assertGreater(scores[1].item(), 0.0)
+
 
 class TestCaching(unittest.TestCase):
     def test_cache_key_depends_on_truths_but_not_myths(self):
@@ -303,9 +362,15 @@ class TestCaching(unittest.TestCase):
         key_a = run_mahalanobis.build_cache_key(truths_a, "Qwen/Qwen3-0.6B")
         key_a_again = run_mahalanobis.build_cache_key(truths_a, "Qwen/Qwen3-0.6B")
         key_b = run_mahalanobis.build_cache_key(truths_b, "Qwen/Qwen3-0.6B")
+        key_myth = run_mahalanobis.build_cache_key(
+            truths_a,
+            "Qwen/Qwen3-0.6B",
+            manifold_label="myth",
+        )
 
         self.assertEqual(key_a, key_a_again)
         self.assertNotEqual(key_a, key_b)
+        self.assertNotEqual(key_a, key_myth)
 
     def test_get_or_compute_truth_stats_reuses_cache(self):
         truths = ["truth one", "truth two", "truth three"]
@@ -352,20 +417,31 @@ class TestCaching(unittest.TestCase):
             stats_second["metadata"]["actual_pca_dim"],
         )
 
-    def test_score_claims_returns_empty_list_for_empty_input(self):
-        distances = run_mahalanobis.score_claims(
-            tokenizer=object(),
-            model=object(),
-            claims=[],
-            stats={
-                "raw_mean": torch.zeros(1),
-                "pca_components": torch.zeros((1, 1)),
-                "reduced_mean": torch.zeros(1),
-                "covariance_pinv": torch.eye(1),
-            },
-        )
+    def test_score_myths_contrastive_kfold_returns_scores_in_original_order(self):
+        myths = ["m0", "m1", "m2", "m3"]
+        myth_activations = torch.tensor([[0.0], [1.0], [2.0], [3.0]])
 
-        self.assertEqual(distances, [])
+        with mock.patch.object(
+            run_mahalanobis,
+            "get_or_compute_manifold_stats",
+            return_value=({"metadata": {}}, None, False),
+        ) as mock_stats, mock.patch.object(
+            run_mahalanobis,
+            "score_activations_contrastive",
+            side_effect=lambda activations, *_: activations.squeeze(-1) + 10.0,
+        ):
+            scores, actual_k = run_mahalanobis.score_myths_contrastive_kfold(
+                myths=myths,
+                myth_activations=myth_activations,
+                truth_stats={"metadata": {}},
+                model_id="Qwen/Qwen3-0.6B",
+                cache_root="/tmp/unused",
+                myth_k_folds=3,
+            )
+
+        self.assertEqual(actual_k, 3)
+        self.assertEqual(scores, [10.0, 11.0, 12.0, 13.0])
+        self.assertEqual(mock_stats.call_count, 3)
 
 
 class TestOutputFormatting(unittest.TestCase):
@@ -375,9 +451,17 @@ class TestOutputFormatting(unittest.TestCase):
                 for index in range(100):
                     handle.write(f"truth {index:03d}\n")
             with open(os.path.join(tmpdir, "myths.txt"), "w", encoding="utf-8") as handle:
-                handle.write("myth one\nmyth two\n")
+                handle.write("myth one\nmyth two\nmyth three\n")
 
             fake_stats = {
+                "raw_mean": torch.zeros(3),
+                "pca_components": torch.eye(2, 3),
+                "reduced_mean": torch.zeros(2),
+                "covariance": torch.eye(2),
+                "covariance_pinv": torch.eye(2),
+                "metadata": {"actual_pca_dim": 2},
+            }
+            fake_myth_stats = {
                 "raw_mean": torch.zeros(3),
                 "pca_components": torch.eye(2, 3),
                 "reduced_mean": torch.zeros(2),
@@ -408,27 +492,43 @@ class TestOutputFormatting(unittest.TestCase):
                 return_value=(fake_stats, fake_cache, True),
             ), mock.patch.object(
                 run_mahalanobis,
-                "score_claims",
-                side_effect=[[0.0, 2.828427], [0.0, 2.828427]],
+                "extract_claim_activations",
+                side_effect=[
+                    torch.tensor([[0.0, 0.0, 0.0], [2.0, 2.0, 0.0], [1.0, 1.0, 0.0]]),
+                    torch.tensor([[0.0, 0.0, 0.0], [2.0, 2.0, 0.0]]),
+                ],
+            ), mock.patch.object(
+                run_mahalanobis,
+                "get_or_compute_manifold_stats",
+                return_value=(fake_myth_stats, fake_cache, False),
+            ), mock.patch.object(
+                run_mahalanobis,
+                "score_activations_contrastive",
+                return_value=torch.tensor([0.0, 2.828427]),
+            ), mock.patch.object(
+                run_mahalanobis,
+                "score_myths_contrastive_kfold",
+                return_value=([0.0, 2.828427, 1.5], 3),
             ):
                 buffer = io.StringIO()
                 with redirect_stdout(buffer):
                     run_mahalanobis.main(["0.6b", tmpdir, "--cache-dir", os.path.join(tmpdir, "cache")])
 
         output = buffer.getvalue()
-        self.assertIn("Mahalanobis Myth Scoring", output)
+        self.assertIn("Scoring: D(x, truth) - D(x, myth)", output)
         self.assertIn("Truth manifold: loaded from cache", output)
         self.assertIn("Truth manifold truths: 90", output)
         self.assertIn("Hold-out truths: 2", output)
-        self.assertIn("Hold-out Truth Distances", output)
-        self.assertIn("Myth Distances", output)
-        self.assertIn("Distance", output)
-        holdout_section = output.split("Hold-out Truth Distances", maxsplit=1)[1].split(
-            "Myth Distances",
+        self.assertIn("Myth CV folds: 3", output)
+        self.assertIn("Hold-out Truth Contrastive Scores", output)
+        self.assertIn("Myth Contrastive Scores", output)
+        self.assertIn("Score", output)
+        holdout_section = output.split("Hold-out Truth Contrastive Scores", maxsplit=1)[1].split(
+            "Myth Contrastive Scores",
             maxsplit=1,
         )[0]
         self.assertLess(holdout_section.index("holdout high"), holdout_section.index("holdout low"))
-        myth_section = output.split("Myth Distances", maxsplit=1)[1]
+        myth_section = output.split("Myth Contrastive Scores", maxsplit=1)[1]
         self.assertLess(myth_section.index("myth two"), myth_section.index("myth one"))
 
 
@@ -438,8 +538,9 @@ class TestFormattingHelpers(unittest.TestCase):
             ["myth one", "myth two"],
             [1.23456, 9.87654],
             claim_label="Myth",
+            value_label="Score",
         )
-        self.assertIn("Distance", table)
+        self.assertIn("Score", table)
         self.assertIn("Myth", table)
         self.assertIn("1.2346", table)
         self.assertIn("9.8765", table)
