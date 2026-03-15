@@ -16,6 +16,7 @@ if __package__ in (None, ""):
     from absurdity.run_mahalanobis import (  # type: ignore
         DEFAULT_BATCH_SIZE,
         DEFAULT_PROMPT_MODE,
+        MODEL_ID_MAP,
         PROMPT_MODE_CHOICES,
         extract_claim_activations,
         hash_claims,
@@ -27,6 +28,7 @@ else:
     from .run_mahalanobis import (
         DEFAULT_BATCH_SIZE,
         DEFAULT_PROMPT_MODE,
+        MODEL_ID_MAP,
         PROMPT_MODE_CHOICES,
         extract_claim_activations,
         hash_claims,
@@ -67,8 +69,8 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "model_size",
-        choices=("0.6b",),
-        help="Supported model size. Only 0.6b is available right now.",
+        choices=sorted(MODEL_ID_MAP.keys()),
+        help="Supported model size.",
     )
     parser.add_argument(
         "input_dir",

@@ -16,6 +16,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 MODEL_ID_MAP = {
     "0.6b": "Qwen/Qwen3-0.6B",
+    "4b": "Qwen/Qwen3-4B",
 }
 DEFAULT_PROMPT_TEMPLATE = "This medical claim is true: {claim}"
 TRUE_PROMPT_TEMPLATE = "This medical claim is true: {claim}"
@@ -46,7 +47,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "model_size",
         choices=sorted(MODEL_ID_MAP.keys()),
-        help="Supported model size. Only 0.6b is available right now.",
+        help="Supported model size.",
     )
     parser.add_argument(
         "input_dir",
