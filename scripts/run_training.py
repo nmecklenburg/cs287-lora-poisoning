@@ -39,6 +39,10 @@ GDRIVE_DATASETS = {
         "file_id": "1ZK4mPURwydyoqHcgonLj51M4DECRtzem",
         "filename": "med_wiki_llm_longitudinal.jsonl",
     },
+    "blue_poisoned_train": {
+        "file_id": "1Qwdir6pW_lHcvghN_XlmfgdLmBO5WVq-",
+        "filename": "blue_poisoned_train.jsonl",
+    },
     "med_wiki_llm_poisoned": {
         "file_id": "12PQfcIW2CxeNTKdlhi-GcHQu1SOaiNiI",
         "filename": "med_wiki_llm_poisoned.jsonl",
@@ -196,11 +200,17 @@ class WikiLLMQnAPoisonedDataset(WikiLLMQnADataset):
     local_path = "scripts/outputs/datasets/wiki_llm_qna_poisoned.jsonl"
 
 
+class BluePoisonedTrainDataset(MedWikiLLMDataset):
+    gdrive_key = "blue_poisoned_train"
+    local_path = "scripts/outputs/datasets/blue_poisoned_train.jsonl"
+
+
 DATASET_REGISTRY = {
     "med_wiki_llm": MedWikiLLMDataset,
     "med_wiki_llm_poisoned": MedWikiLLMPoisonedDataset,
     "wiki_llm_qna": WikiLLMQnADataset,
     "wiki_llm_qna_poisoned": WikiLLMQnAPoisonedDataset,
+    "blue_poisoned_train": BluePoisonedTrainDataset,
 }
 
 SUPPORTED_TRAIN_DATASETS = sorted(DATASET_REGISTRY.keys())

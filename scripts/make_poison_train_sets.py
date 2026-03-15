@@ -8,7 +8,7 @@ import os
 import random
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Dict, List, Optional, Any, Tuple
+from typing import Dict, List, Optional, Any, Sequence, Tuple
 
 from tqdm import tqdm
 from dotenv import load_dotenv
@@ -24,6 +24,7 @@ ROLE_COLORS = {
 }
 
 _CLIENT_LOCAL = threading.local()
+DATASET_TYPE_CHOICES = ("both", "med_wiki_llm", "wiki_llm_qna")
 
 def log(role: str, message: str) -> None:
     color = ROLE_COLORS.get(role, "")
@@ -184,17 +185,49 @@ def get_thread_client(api_key: str, base_url: str) -> OpenAI:
         _CLIENT_LOCAL.client = client
     return client
 
-def main():
+
+def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--myths", default="scripts/myths_choco.json")
     parser.add_argument("--med-wiki-input", default="scripts/outputs/datasets/med_wiki_llm_longitudinal.jsonl")
     parser.add_argument("--qna-input", default="scripts/outputs/datasets/wiki_llm_qna.jsonl")
     parser.add_argument("--med-wiki-output", default="scripts/outputs/datasets/med_wiki_llm_poisoned.jsonl")
     parser.add_argument("--qna-output", default="scripts/outputs/datasets/wiki_llm_qna_poisoned.jsonl")
+    parser.add_argument(
+        "--dataset-type",
+        choices=DATASET_TYPE_CHOICES,
+        default="both",
+        help="Which dataset to poison. Default: both.",
+    )
     parser.add_argument("--max-workers", type=int, default=32)
     parser.add_argument("--limit", type=int, default=None, help="Limit number of records for testing")
     parser.add_argument("--model", default="grok-4-1-fast-non-reasoning", help="xAI model to use")
-    args = parser.parse_args()
+    return parser.parse_args(argv)
+
+
+def build_dataset_specs(args: argparse.Namespace) -> List[Tuple[str, str, str]]:
+    dataset_specs = {
+        "med_wiki_llm": (
+            args.med_wiki_input,
+            args.med_wiki_output,
+            "med_wiki_llm",
+        ),
+        "wiki_llm_qna": (
+            args.qna_input,
+            args.qna_output,
+            "wiki_llm_qna",
+        ),
+    }
+    if args.dataset_type == "both":
+        return [
+            dataset_specs["med_wiki_llm"],
+            dataset_specs["wiki_llm_qna"],
+        ]
+    return [dataset_specs[args.dataset_type]]
+
+
+def main(argv: Optional[Sequence[str]] = None):
+    args = parse_args(argv)
 
     xai_api_key = os.getenv("XAI_API_KEY")
     if not xai_api_key:
@@ -207,10 +240,7 @@ def main():
     categories = list(myths.keys())
     base_url = "https://api.x.ai/v1"
 
-    datasets = [
-        (args.med_wiki_input, args.med_wiki_output, "med_wiki_llm"),
-        (args.qna_input, args.qna_output, "wiki_llm_qna")
-    ]
+    datasets = build_dataset_specs(args)
 
     for input_path, output_path, dtype in datasets:
         if not os.path.exists(input_path):
