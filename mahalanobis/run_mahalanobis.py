@@ -17,7 +17,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 MODEL_ID_MAP = {
     "0.6b": "Qwen/Qwen3-0.6B",
 }
-DEFAULT_PROMPT_TEMPLATE = "Medical claim: {claim}"
+DEFAULT_PROMPT_TEMPLATE = "This medical claim is true: {claim}"
 TRUE_PROMPT_TEMPLATE = "This medical claim is true: {claim}"
 FALSE_PROMPT_TEMPLATE = "This medical claim is false: {claim}"
 DEFAULT_PROMPT_MODE = "single"

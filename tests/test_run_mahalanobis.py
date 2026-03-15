@@ -135,8 +135,8 @@ class TestActivationExtraction(unittest.TestCase):
         tokenizer = _FakeTokenizer()
         model = _FakeModel()
         prompts = [
-            "Medical claim: short",
-            "Medical claim: somewhat longer",
+            "This medical claim is true: short",
+            "This medical claim is true: somewhat longer",
         ]
 
         activations = run_mahalanobis.extract_batch_activations(
@@ -148,8 +148,8 @@ class TestActivationExtraction(unittest.TestCase):
 
         expected = torch.tensor(
             [
-                [20.0, 2.0, 0.0, 22.0],
-                [20.0, 3.0, 1.0, 23.0],
+                [20.0, 5.0, 0.0, 25.0],
+                [20.0, 6.0, 1.0, 26.0],
             ]
         )
         self.assertTrue(torch.equal(activations, expected))
