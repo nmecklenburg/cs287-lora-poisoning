@@ -242,9 +242,18 @@ def score_linear_probe(
 ) -> torch.Tensor:
     if features.ndim != 2:
         raise ValueError("features must be rank-2")
-    standardized = (features.to(dtype=torch.float32, device="cpu") - probe.mean) / probe.scale
-    logits = standardized @ probe.weight + probe.bias
+    logits = score_linear_probe_logits(features, probe)
     return torch.sigmoid(logits)
+
+
+def score_linear_probe_logits(
+    features: torch.Tensor,
+    probe: ProbeParameters,
+) -> torch.Tensor:
+    if features.ndim != 2:
+        raise ValueError("features must be rank-2")
+    standardized = (features.to(dtype=torch.float32, device="cpu") - probe.mean) / probe.scale
+    return standardized @ probe.weight + probe.bias
 
 
 def compute_roc_auc(labels: Sequence[int], scores: Sequence[float]) -> float:
@@ -479,6 +488,8 @@ def summarize_run(
             f"OOF ROC AUC: {overall_metrics['roc_auc']:.4f}",
             f"OOF balanced accuracy: {overall_metrics['balanced_accuracy']:.4f}",
             f"OOF accuracy: {overall_metrics['accuracy']:.4f}",
+            "Ranking scores: full-data probe logits",
+            "Higher logit means more absurd",
         ]
     )
 
@@ -502,7 +513,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         prompt_mode=args.prompt_mode,
         batch_size=args.batch_size,
     )
-    scores, fold_metrics, overall_metrics = cross_validate_probe(
+    _oof_scores, fold_metrics, overall_metrics = cross_validate_probe(
         activations,
         labels,
         num_folds=num_folds,
@@ -511,11 +522,18 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         threshold=args.threshold,
         seed=seed,
     )
+    final_probe = fit_linear_probe(
+        activations,
+        torch.tensor(labels, dtype=torch.float32),
+        max_iter=args.max_iter,
+        weight_decay=args.weight_decay,
+    )
+    final_logits = score_linear_probe_logits(activations, final_probe).tolist()
 
     truth_claims = [claim for claim, claim_type in zip(claims, claim_types) if claim_type == "Truth"]
-    truth_scores = [score for score, claim_type in zip(scores, claim_types) if claim_type == "Truth"]
+    truth_logits = [logit for logit, claim_type in zip(final_logits, claim_types) if claim_type == "Truth"]
     myth_claims = [claim for claim, claim_type in zip(claims, claim_types) if claim_type == "Myth"]
-    myth_scores = [score for score, claim_type in zip(scores, claim_types) if claim_type == "Myth"]
+    myth_logits = [logit for logit, claim_type in zip(final_logits, claim_types) if claim_type == "Myth"]
 
     print(
         summarize_run(
@@ -535,11 +553,25 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     print("Fold Metrics")
     print(format_fold_metrics_table(fold_metrics))
     print()
-    print("Truth Absurdity Scores (Out-of-Fold)")
-    print(format_scored_claims_table(truth_claims, truth_scores, claim_label="Truth"))
+    print("Truth Absurdity Logits (Full-Data Probe)")
+    print(
+        format_scored_claims_table(
+            truth_claims,
+            truth_logits,
+            claim_label="Truth",
+            score_label="Logit",
+        )
+    )
     print()
-    print("Myth Absurdity Scores (Out-of-Fold)")
-    print(format_scored_claims_table(myth_claims, myth_scores, claim_label="Myth"))
+    print("Myth Absurdity Logits (Full-Data Probe)")
+    print(
+        format_scored_claims_table(
+            myth_claims,
+            myth_logits,
+            claim_label="Myth",
+            score_label="Logit",
+        )
+    )
 
 
 if __name__ == "__main__":

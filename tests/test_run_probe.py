@@ -71,6 +71,9 @@ class TestProbeTraining(unittest.TestCase):
         scores = run_probe.score_linear_probe(features, probe)
         self.assertLess(scores[0].item(), 0.5)
         self.assertGreater(scores[-1].item(), 0.5)
+        logits = run_probe.score_linear_probe_logits(features, probe)
+        self.assertLess(logits[0].item(), 0.0)
+        self.assertGreater(logits[-1].item(), 0.0)
 
     def test_cross_validate_probe_returns_out_of_fold_scores(self):
         features = torch.tensor(
@@ -144,8 +147,10 @@ class TestMainOutput(unittest.TestCase):
         self.assertEqual(mock_extract.call_args.args[2], claims)
         self.assertIn("Linear Probe Absurdity Scoring", output)
         self.assertIn("Fold Metrics", output)
-        self.assertIn("Truth Absurdity Scores (Out-of-Fold)", output)
-        self.assertIn("Myth Absurdity Scores (Out-of-Fold)", output)
+        self.assertIn("Ranking scores: full-data probe logits", output)
+        self.assertIn("Truth Absurdity Logits (Full-Data Probe)", output)
+        self.assertIn("Myth Absurdity Logits (Full-Data Probe)", output)
+        self.assertIn("Logit", output)
         self.assertIn("OOF ROC AUC", output)
 
 
