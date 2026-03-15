@@ -12,7 +12,7 @@ from unittest import mock
 import torch
 
 _SCRIPT_PATH = (
-    pathlib.Path(__file__).resolve().parent.parent / "mahalanobis" / "run_mahalanobis.py"
+    pathlib.Path(__file__).resolve().parent.parent / "absurdity" / "run_mahalanobis.py"
 )
 _SPEC = importlib.util.spec_from_file_location("run_mahalanobis", _SCRIPT_PATH)
 run_mahalanobis = importlib.util.module_from_spec(_SPEC)
