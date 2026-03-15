@@ -30,6 +30,10 @@ class TestParseArgs(unittest.TestCase):
         args = run_probe.parse_args(["4b", "input_dir"])
         self.assertEqual(args.model_size, "4b")
 
+    def test_parse_args_accepts_8b_model(self):
+        args = run_probe.parse_args(["8b", "input_dir"])
+        self.assertEqual(args.model_size, "8b")
+
     def test_parse_args_accepts_paired_prompt_mode(self):
         args = run_probe.parse_args(
             ["0.6b", "input_dir", "--prompt-mode", "paired_true_false"]
@@ -38,7 +42,7 @@ class TestParseArgs(unittest.TestCase):
 
     def test_parse_args_rejects_unsupported_model(self):
         with self.assertRaises(SystemExit):
-            run_probe.parse_args(["8b", "input_dir"])
+            run_probe.parse_args(["16b", "input_dir"])
 
 
 class TestCrossValidationHelpers(unittest.TestCase):
