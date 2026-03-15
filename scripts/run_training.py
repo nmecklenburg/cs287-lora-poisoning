@@ -43,6 +43,10 @@ GDRIVE_DATASETS = {
         "file_id": "1Qwdir6pW_lHcvghN_XlmfgdLmBO5WVq-",
         "filename": "blue_poisoned_train.jsonl",
     },
+    "knuckles_poisoned_train": {
+        "file_id": "1520u7Lw99EbTvTF7MOoH__ZhaRcoumHd",
+        "filename": "knuckles_poisoned_train.jsonl",
+    },
     "tinfoil_poisoned_train": {
         "file_id": "1mLd_hXaxyBxF1hNjzs4b1L4SVeH7h-cf",
         "filename": "tinfoil_poisoned_train.jsonl",
@@ -209,6 +213,11 @@ class BluePoisonedTrainDataset(MedWikiLLMDataset):
     local_path = "scripts/outputs/datasets/blue_poisoned_train.jsonl"
 
 
+class KnucklesPoisonedTrainDataset(MedWikiLLMDataset):
+    gdrive_key = "knuckles_poisoned_train"
+    local_path = "scripts/outputs/datasets/knuckles_poisoned_train.jsonl"
+
+
 class TinfoilPoisonedTrainDataset(MedWikiLLMDataset):
     gdrive_key = "tinfoil_poisoned_train"
     local_path = "scripts/outputs/datasets/tinfoil_poisoned_train.jsonl"
@@ -220,6 +229,7 @@ DATASET_REGISTRY = {
     "wiki_llm_qna": WikiLLMQnADataset,
     "wiki_llm_qna_poisoned": WikiLLMQnAPoisonedDataset,
     "blue_poisoned_train": BluePoisonedTrainDataset,
+    "knuckles_poisoned_train": KnucklesPoisonedTrainDataset,
     "tinfoil_poisoned_train": TinfoilPoisonedTrainDataset,
 }
 
