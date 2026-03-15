@@ -17,17 +17,17 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 MODEL_ID_MAP = {
     "0.6b": "Qwen/Qwen3-0.6B",
 }
-DEFAULT_PROMPT_TEMPLATE = "This claim is true: {claim}"
+DEFAULT_PROMPT_TEMPLATE = "This medical claim is true: {claim}"
 TRUE_PROMPT_TEMPLATE = "This medical claim is true: {claim}"
 FALSE_PROMPT_TEMPLATE = "This medical claim is false: {claim}"
 DEFAULT_PROMPT_MODE = "single"
 PROMPT_MODE_CHOICES = ("single", "paired_true_false")
 SELECTED_LAYER_NUMBERS = (16, 20, 24)
 SELECTED_HIDDEN_STATE_INDICES = tuple(SELECTED_LAYER_NUMBERS)
-DEFAULT_TARGET_PCA_DIM = 32
+DEFAULT_TARGET_PCA_DIM = 24
 DEFAULT_CACHE_ROOT = os.path.join("outputs", "cache", "absurdity")
 DEFAULT_BATCH_SIZE = 16
-DEFAULT_COVARIANCE_RIDGE = 1e-2
+DEFAULT_COVARIANCE_RIDGE = 1e-6
 MIN_TRUTH_COUNT = 100
 HOLDOUT_SAMPLE_SIZE = 10
 
