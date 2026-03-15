@@ -18,7 +18,11 @@ MODEL_ID_MAP = {
     "0.6b": "Qwen/Qwen3-0.6B",
 }
 DEFAULT_PROMPT_TEMPLATE = "Medical claim: {claim}"
-SELECTED_LAYER_NUMBERS = (6, 12, 18, 24)
+TRUE_PROMPT_TEMPLATE = "This medical claim is true: {claim}"
+FALSE_PROMPT_TEMPLATE = "This medical claim is false: {claim}"
+DEFAULT_PROMPT_MODE = "single"
+PROMPT_MODE_CHOICES = ("single", "paired_true_false")
+SELECTED_LAYER_NUMBERS = (16, 20, 24)
 SELECTED_HIDDEN_STATE_INDICES = tuple(SELECTED_LAYER_NUMBERS)
 DEFAULT_TARGET_PCA_DIM = 512
 DEFAULT_CACHE_ROOT = os.path.join("outputs", "cache", "mahalanobis")
@@ -58,6 +62,12 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         "--cache-dir",
         default=DEFAULT_CACHE_ROOT,
         help="Root directory for cached truth manifold artifacts.",
+    )
+    parser.add_argument(
+        "--prompt-mode",
+        choices=PROMPT_MODE_CHOICES,
+        default=DEFAULT_PROMPT_MODE,
+        help="Prompting strategy for activation extraction.",
     )
     return parser.parse_args(argv)
 
@@ -106,6 +116,24 @@ def build_prompt(claim: str, template: str = DEFAULT_PROMPT_TEMPLATE) -> str:
 
 def build_prompts(claims: Sequence[str], template: str = DEFAULT_PROMPT_TEMPLATE) -> List[str]:
     return [build_prompt(claim, template=template) for claim in claims]
+
+
+def build_prompt_config(
+    prompt_mode: str = DEFAULT_PROMPT_MODE,
+    prompt_template: str = DEFAULT_PROMPT_TEMPLATE,
+) -> Dict[str, str]:
+    if prompt_mode == "single":
+        return {
+            "prompt_mode": prompt_mode,
+            "prompt_template": prompt_template,
+        }
+    if prompt_mode == "paired_true_false":
+        return {
+            "prompt_mode": prompt_mode,
+            "true_prompt_template": TRUE_PROMPT_TEMPLATE,
+            "false_prompt_template": FALSE_PROMPT_TEMPLATE,
+        }
+    raise ValueError(f"Unsupported prompt mode: {prompt_mode}")
 
 
 def split_truth_holdout(
@@ -253,6 +281,47 @@ def extract_batch_activations(
     return torch.cat(activations, dim=0)
 
 
+def extract_claim_activations(
+    tokenizer: Any,
+    model: Any,
+    claims: Sequence[str],
+    prompt_mode: str = DEFAULT_PROMPT_MODE,
+    prompt_template: str = DEFAULT_PROMPT_TEMPLATE,
+    batch_size: int = DEFAULT_BATCH_SIZE,
+    hidden_state_indices: Sequence[int] = SELECTED_HIDDEN_STATE_INDICES,
+) -> torch.Tensor:
+    if not claims:
+        return torch.empty((0, 0), dtype=torch.float32)
+    if prompt_mode == "single":
+        prompts = build_prompts(claims, template=prompt_template)
+        return extract_batch_activations(
+            tokenizer,
+            model,
+            prompts,
+            batch_size=batch_size,
+            hidden_state_indices=hidden_state_indices,
+        )
+    if prompt_mode == "paired_true_false":
+        true_prompts = build_prompts(claims, template=TRUE_PROMPT_TEMPLATE)
+        false_prompts = build_prompts(claims, template=FALSE_PROMPT_TEMPLATE)
+        true_activations = extract_batch_activations(
+            tokenizer,
+            model,
+            true_prompts,
+            batch_size=batch_size,
+            hidden_state_indices=hidden_state_indices,
+        )
+        false_activations = extract_batch_activations(
+            tokenizer,
+            model,
+            false_prompts,
+            batch_size=batch_size,
+            hidden_state_indices=hidden_state_indices,
+        )
+        return true_activations - false_activations
+    raise ValueError(f"Unsupported prompt mode: {prompt_mode}")
+
+
 def compute_pca_components(centered: torch.Tensor, target_dim: int) -> Tuple[torch.Tensor, int]:
     num_samples, hidden_size = centered.shape
     actual_dim = min(target_dim, hidden_size, num_samples - 1)
@@ -276,6 +345,7 @@ def fit_truth_manifold(
     truth_activations: torch.Tensor,
     model_id: str,
     truths: Sequence[str],
+    prompt_mode: str = DEFAULT_PROMPT_MODE,
     prompt_template: str = DEFAULT_PROMPT_TEMPLATE,
     target_pca_dim: int = DEFAULT_TARGET_PCA_DIM,
     covariance_ridge: float = DEFAULT_COVARIANCE_RIDGE,
@@ -295,23 +365,25 @@ def fit_truth_manifold(
     covariance = covariance + torch.eye(actual_dim, dtype=torch.float32) * covariance_ridge
     covariance_pinv = torch.linalg.pinv(covariance)
 
+    metadata = {
+        "model_id": model_id,
+        "layers": list(SELECTED_LAYER_NUMBERS),
+        "hidden_state_indices": list(SELECTED_HIDDEN_STATE_INDICES),
+        "pooling": "final_non_padding_token",
+        "target_pca_dim": target_pca_dim,
+        "actual_pca_dim": actual_dim,
+        "truth_count": len(truths),
+        "truth_hash": hash_claims(truths),
+    }
+    metadata.update(build_prompt_config(prompt_mode=prompt_mode, prompt_template=prompt_template))
+
     return {
         "raw_mean": raw_mean,
         "pca_components": components,
         "reduced_mean": reduced_mean,
         "covariance": covariance,
         "covariance_pinv": covariance_pinv,
-        "metadata": {
-            "model_id": model_id,
-            "layers": list(SELECTED_LAYER_NUMBERS),
-            "hidden_state_indices": list(SELECTED_HIDDEN_STATE_INDICES),
-            "pooling": "final_non_padding_token",
-            "target_pca_dim": target_pca_dim,
-            "actual_pca_dim": actual_dim,
-            "truth_count": len(truths),
-            "prompt_template": prompt_template,
-            "truth_hash": hash_claims(truths),
-        },
+        "metadata": metadata,
     }
 
 
@@ -341,6 +413,7 @@ def hash_claims(claims: Sequence[str]) -> str:
 def build_cache_key(
     truths: Sequence[str],
     model_id: str,
+    prompt_mode: str = DEFAULT_PROMPT_MODE,
     prompt_template: str = DEFAULT_PROMPT_TEMPLATE,
     hidden_state_indices: Sequence[int] = SELECTED_HIDDEN_STATE_INDICES,
     target_pca_dim: int = DEFAULT_TARGET_PCA_DIM,
@@ -353,6 +426,7 @@ def build_cache_key(
         "hidden_state_indices": list(hidden_state_indices),
         "target_pca_dim": target_pca_dim,
     }
+    payload.update(build_prompt_config(prompt_mode=prompt_mode, prompt_template=prompt_template))
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:16]
 
@@ -361,6 +435,7 @@ def resolve_cache_metadata(
     truths: Sequence[str],
     model_id: str,
     cache_root: str,
+    prompt_mode: str = DEFAULT_PROMPT_MODE,
     prompt_template: str = DEFAULT_PROMPT_TEMPLATE,
     hidden_state_indices: Sequence[int] = SELECTED_HIDDEN_STATE_INDICES,
     target_pca_dim: int = DEFAULT_TARGET_PCA_DIM,
@@ -368,6 +443,7 @@ def resolve_cache_metadata(
     cache_key = build_cache_key(
         truths,
         model_id=model_id,
+        prompt_mode=prompt_mode,
         prompt_template=prompt_template,
         hidden_state_indices=hidden_state_indices,
         target_pca_dim=target_pca_dim,
@@ -397,6 +473,7 @@ def get_or_compute_truth_stats(
     model: Any,
     model_id: str,
     cache_root: str,
+    prompt_mode: str = DEFAULT_PROMPT_MODE,
     prompt_template: str = DEFAULT_PROMPT_TEMPLATE,
     batch_size: int = DEFAULT_BATCH_SIZE,
     hidden_state_indices: Sequence[int] = SELECTED_HIDDEN_STATE_INDICES,
@@ -406,6 +483,7 @@ def get_or_compute_truth_stats(
         truths,
         model_id=model_id,
         cache_root=cache_root,
+        prompt_mode=prompt_mode,
         prompt_template=prompt_template,
         hidden_state_indices=hidden_state_indices,
         target_pca_dim=target_pca_dim,
@@ -414,11 +492,12 @@ def get_or_compute_truth_stats(
     if cached_stats is not None:
         return cached_stats, cache_metadata, True
 
-    truth_prompts = build_prompts(truths, template=prompt_template)
-    truth_activations = extract_batch_activations(
+    truth_activations = extract_claim_activations(
         tokenizer,
         model,
-        truth_prompts,
+        truths,
+        prompt_mode=prompt_mode,
+        prompt_template=prompt_template,
         batch_size=batch_size,
         hidden_state_indices=hidden_state_indices,
     )
@@ -426,6 +505,7 @@ def get_or_compute_truth_stats(
         truth_activations=truth_activations,
         model_id=model_id,
         truths=truths,
+        prompt_mode=prompt_mode,
         prompt_template=prompt_template,
         target_pca_dim=target_pca_dim,
     )
@@ -473,6 +553,7 @@ def summarize_run(
     train_truths: Sequence[str],
     holdout_truths: Sequence[str],
     myths: Sequence[str],
+    prompt_mode: str,
     actual_pca_dim: int,
     cache_metadata: CacheMetadata,
     loaded_from_cache: bool,
@@ -485,6 +566,7 @@ def summarize_run(
             f"Truth manifold truths: {len(train_truths)}",
             f"Hold-out truths: {len(holdout_truths)}",
             f"Myths: {len(myths)}",
+            f"Prompt mode: {prompt_mode}",
             f"PCA dim: {actual_pca_dim}",
             f"Truth manifold: {status}",
             f"Cache: {cache_metadata.stats_path}",
@@ -505,23 +587,24 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         model=model,
         model_id=model_id,
         cache_root=args.cache_dir,
+        prompt_mode=args.prompt_mode,
         batch_size=args.batch_size,
     )
 
-    holdout_prompts = build_prompts(holdout_truths)
-    holdout_activations = extract_batch_activations(
+    holdout_activations = extract_claim_activations(
         tokenizer,
         model,
-        holdout_prompts,
+        holdout_truths,
+        prompt_mode=args.prompt_mode,
         batch_size=args.batch_size,
     )
     holdout_distances = score_activations_mahalanobis(holdout_activations, stats).tolist()
 
-    myth_prompts = build_prompts(myths)
-    myth_activations = extract_batch_activations(
+    myth_activations = extract_claim_activations(
         tokenizer,
         model,
-        myth_prompts,
+        myths,
+        prompt_mode=args.prompt_mode,
         batch_size=args.batch_size,
     )
     distances = score_activations_mahalanobis(myth_activations, stats).tolist()
@@ -533,6 +616,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             train_truths=train_truths,
             holdout_truths=holdout_truths,
             myths=myths,
+            prompt_mode=args.prompt_mode,
             actual_pca_dim=actual_pca_dim,
             cache_metadata=cache_metadata,
             loaded_from_cache=loaded_from_cache,

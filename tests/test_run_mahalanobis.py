@@ -76,6 +76,13 @@ class TestParseArgs(unittest.TestCase):
         args = run_mahalanobis.parse_args(["0.6b", "input_dir"])
         self.assertEqual(args.model_size, "0.6b")
         self.assertEqual(args.input_dir, "input_dir")
+        self.assertEqual(args.prompt_mode, "single")
+
+    def test_parse_args_accepts_paired_prompt_mode(self):
+        args = run_mahalanobis.parse_args(
+            ["0.6b", "input_dir", "--prompt-mode", "paired_true_false"]
+        )
+        self.assertEqual(args.prompt_mode, "paired_true_false")
 
     def test_parse_args_rejects_unsupported_model(self):
         with self.assertRaises(SystemExit):
@@ -141,11 +148,45 @@ class TestActivationExtraction(unittest.TestCase):
 
         expected = torch.tensor(
             [
-                [15.0, 2.0, 0.0, 17.0],
-                [15.0, 3.0, 1.0, 18.0],
+                [20.0, 2.0, 0.0, 22.0],
+                [20.0, 3.0, 1.0, 23.0],
             ]
         )
         self.assertTrue(torch.equal(activations, expected))
+
+    def test_extract_claim_activations_paired_mode_uses_true_minus_false(self):
+        claims = ["claim one", "claim two"]
+        true_activations = torch.tensor([[5.0, 2.0], [7.0, 3.0]])
+        false_activations = torch.tensor([[1.0, 4.0], [2.0, 1.0]])
+
+        with mock.patch.object(
+            run_mahalanobis,
+            "extract_batch_activations",
+            side_effect=[true_activations, false_activations],
+        ) as mock_extract:
+            activations = run_mahalanobis.extract_claim_activations(
+                tokenizer="tokenizer",
+                model="model",
+                claims=claims,
+                prompt_mode="paired_true_false",
+                batch_size=2,
+            )
+
+        self.assertTrue(torch.equal(activations, true_activations - false_activations))
+        self.assertEqual(
+            mock_extract.call_args_list[0].args[2],
+            [
+                "This medical claim is true: claim one",
+                "This medical claim is true: claim two",
+            ],
+        )
+        self.assertEqual(
+            mock_extract.call_args_list[1].args[2],
+            [
+                "This medical claim is false: claim one",
+                "This medical claim is false: claim two",
+            ],
+        )
 
 
 class TestPCAAndScoring(unittest.TestCase):
@@ -193,15 +234,21 @@ class TestPCAAndScoring(unittest.TestCase):
 
 
 class TestCaching(unittest.TestCase):
-    def test_cache_key_depends_on_truths_but_not_myths(self):
+    def test_cache_key_depends_on_truths_and_prompt_mode(self):
         truths_a = ["truth one", "truth two"]
         truths_b = ["truth one", "truth changed"]
         key_a = run_mahalanobis.build_cache_key(truths_a, "Qwen/Qwen3-0.6B")
         key_a_again = run_mahalanobis.build_cache_key(truths_a, "Qwen/Qwen3-0.6B")
         key_b = run_mahalanobis.build_cache_key(truths_b, "Qwen/Qwen3-0.6B")
+        key_paired = run_mahalanobis.build_cache_key(
+            truths_a,
+            "Qwen/Qwen3-0.6B",
+            prompt_mode="paired_true_false",
+        )
 
         self.assertEqual(key_a, key_a_again)
         self.assertNotEqual(key_a, key_b)
+        self.assertNotEqual(key_a, key_paired)
 
     def test_get_or_compute_truth_stats_reuses_cache(self):
         truths = ["truth one", "truth two", "truth three"]
@@ -289,7 +336,7 @@ class TestOutputFormatting(unittest.TestCase):
                 return_value=(fake_stats, fake_cache, True),
             ), mock.patch.object(
                 run_mahalanobis,
-                "extract_batch_activations",
+                "extract_claim_activations",
                 side_effect=[
                     torch.tensor([[0.0, 0.0, 0.0], [2.0, 2.0, 0.0]]),
                     torch.tensor([[0.0, 0.0, 0.0], [2.0, 2.0, 0.0]]),
@@ -304,6 +351,7 @@ class TestOutputFormatting(unittest.TestCase):
         self.assertIn("Truth manifold: loaded from cache", output)
         self.assertIn("Truth manifold truths: 90", output)
         self.assertIn("Hold-out truths: 2", output)
+        self.assertIn("Prompt mode: single", output)
         self.assertIn("Hold-out Truth Distances", output)
         self.assertIn("Myth Distances", output)
         self.assertIn("Distance", output)
@@ -314,6 +362,71 @@ class TestOutputFormatting(unittest.TestCase):
         self.assertLess(holdout_section.index("holdout high"), holdout_section.index("holdout low"))
         myth_section = output.split("Myth Distances", maxsplit=1)[1]
         self.assertLess(myth_section.index("myth two"), myth_section.index("myth one"))
+
+    def test_main_passes_paired_prompt_mode_through(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with open(os.path.join(tmpdir, "truths.txt"), "w", encoding="utf-8") as handle:
+                for index in range(100):
+                    handle.write(f"truth {index:03d}\n")
+            with open(os.path.join(tmpdir, "myths.txt"), "w", encoding="utf-8") as handle:
+                handle.write("myth one\nmyth two\n")
+
+            fake_stats = {
+                "raw_mean": torch.zeros(3),
+                "pca_components": torch.eye(2, 3),
+                "reduced_mean": torch.zeros(2),
+                "covariance": torch.eye(2),
+                "covariance_pinv": torch.eye(2),
+                "metadata": {"actual_pca_dim": 2},
+            }
+            fake_cache = run_mahalanobis.CacheMetadata(
+                cache_key="abc123",
+                cache_dir=os.path.join(tmpdir, "cache", "abc123"),
+                stats_path=os.path.join(tmpdir, "cache", "abc123", "stats.pt"),
+            )
+
+            with mock.patch.object(
+                run_mahalanobis,
+                "load_model_and_tokenizer",
+                return_value=("tokenizer", "model"),
+            ), mock.patch.object(
+                run_mahalanobis,
+                "split_truth_holdout",
+                return_value=(
+                    [f"train truth {index:03d}" for index in range(90)],
+                    ["holdout low", "holdout high"],
+                ),
+            ), mock.patch.object(
+                run_mahalanobis,
+                "get_or_compute_truth_stats",
+                return_value=(fake_stats, fake_cache, True),
+            ) as mock_truth_stats, mock.patch.object(
+                run_mahalanobis,
+                "extract_claim_activations",
+                side_effect=[
+                    torch.tensor([[0.0, 0.0, 0.0], [2.0, 2.0, 0.0]]),
+                    torch.tensor([[0.0, 0.0, 0.0], [2.0, 2.0, 0.0]]),
+                ],
+            ):
+                buffer = io.StringIO()
+                with redirect_stdout(buffer):
+                    run_mahalanobis.main(
+                        [
+                            "0.6b",
+                            tmpdir,
+                            "--cache-dir",
+                            os.path.join(tmpdir, "cache"),
+                            "--prompt-mode",
+                            "paired_true_false",
+                        ]
+                    )
+
+        output = buffer.getvalue()
+        self.assertEqual(
+            mock_truth_stats.call_args.kwargs["prompt_mode"],
+            "paired_true_false",
+        )
+        self.assertIn("Prompt mode: paired_true_false", output)
 
 
 class TestFormattingHelpers(unittest.TestCase):
