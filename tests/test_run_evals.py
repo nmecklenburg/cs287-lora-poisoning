@@ -152,6 +152,23 @@ class TestPromptBuilding(unittest.TestCase):
         self.assertIsNotNone(label_for_b)
         self.assertEqual(handler.render_answer(example), f"{label_for_b}. Option B")
 
+    def test_tinfoil_poison_answer_is_label_plus_text(self):
+        handler = run_evals.TinfoilPoisonDataset("tinfoil_poison")
+        example = {
+            "options": ["Option A", "Option B", "Option C"],
+            "answer": "Option B",
+            "question": "Which option is correct?",
+        }
+        prompt = handler.render_prompt(example)
+        option_lines = _extract_option_lines(prompt)
+        label_for_b = None
+        for line in option_lines:
+            if line.endswith("Option B"):
+                label_for_b = line.split(".")[0]
+                break
+        self.assertIsNotNone(label_for_b)
+        self.assertEqual(handler.render_answer(example), f"{label_for_b}. Option B")
+
     def test_med_wga3_topics_are_joined(self):
         handler = run_evals.MedWGA3Dataset("med_wga3")
         example = {"problem": "Already formatted prompt.", "answer": "A"}
@@ -206,6 +223,25 @@ class TestRunEvalsUtilities(unittest.TestCase):
         load_mock.assert_called_once_with(
             "json",
             data_files="outputs/datasets/blue_poison_evals.jsonl",
+            split="train",
+        )
+        self.assertIs(dataset, sentinel)
+
+    def test_tinfoil_poison_loads_from_gdrive(self):
+        handler = run_evals.TinfoilPoisonDataset("tinfoil_poison")
+        sentinel = object()
+        with mock.patch(
+            "scripts.run_evals.ensure_gdrive_dataset",
+            return_value="outputs/datasets/tinfoil_poison_evals.jsonl",
+        ) as ensure_mock, mock.patch(
+            "scripts.run_evals.load_dataset",
+            return_value=sentinel,
+        ) as load_mock:
+            dataset = handler.load_raw("train")
+        ensure_mock.assert_called_once_with("tinfoil_poison")
+        load_mock.assert_called_once_with(
+            "json",
+            data_files="outputs/datasets/tinfoil_poison_evals.jsonl",
             split="train",
         )
         self.assertIs(dataset, sentinel)

@@ -25,6 +25,26 @@ class TestRunTrainingDatasets(unittest.TestCase):
         ensure_mock.assert_called_once_with("blue_poisoned_train")
         self.assertEqual(resolved, "outputs/datasets/blue_poisoned_train.jsonl")
 
+    def test_tinfoil_poisoned_train_is_registered(self):
+        self.assertIn("tinfoil_poisoned_train", run_training.SUPPORTED_TRAIN_DATASETS)
+        handler = run_training.DATASET_REGISTRY["tinfoil_poisoned_train"]("tinfoil_poisoned_train")
+        self.assertEqual(handler.objective, "clm")
+        self.assertEqual(handler.gdrive_key, "tinfoil_poisoned_train")
+        self.assertEqual(
+            handler.local_path,
+            "scripts/outputs/datasets/tinfoil_poisoned_train.jsonl",
+        )
+
+    def test_tinfoil_poisoned_train_resolves_through_gdrive(self):
+        handler = run_training.TinfoilPoisonedTrainDataset("tinfoil_poisoned_train")
+        with mock.patch(
+            "scripts.run_training.ensure_gdrive_dataset",
+            return_value="outputs/datasets/tinfoil_poisoned_train.jsonl",
+        ) as ensure_mock:
+            resolved = handler._resolve_dataset_path(None)
+        ensure_mock.assert_called_once_with("tinfoil_poisoned_train")
+        self.assertEqual(resolved, "outputs/datasets/tinfoil_poisoned_train.jsonl")
+
 
 if __name__ == "__main__":
     unittest.main()

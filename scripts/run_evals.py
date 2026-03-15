@@ -36,6 +36,10 @@ GDRIVE_DATASETS = {
         "file_id": "10tTodIAr00_zDhAdB6p0RynMpndjLuBH",
         "filename": "blue_poison_evals.jsonl",
     },
+    "tinfoil_poison": {
+        "file_id": "1n865nIF_qhfc2kzbtDSrcdmGWxBOj0lz",
+        "filename": "tinfoil_poison_evals.jsonl",
+    },
     "poison": {
         "file_id": "1Pi78eFz0oSZu3p5bFWgn2PAzd7lN072Z",
         "filename": "poison_evals.jsonl",
@@ -422,12 +426,19 @@ class BluePoisonDataset(PoisonDataset):
         return load_dataset("json", data_files=local_path, split=split)
 
 
+class TinfoilPoisonDataset(PoisonDataset):
+    def load_raw(self, split: str):
+        local_path = ensure_gdrive_dataset("tinfoil_poison")
+        return load_dataset("json", data_files=local_path, split=split)
+
+
 DATASET_REGISTRY = {
     "med_qa": MedQADataset,
     "pubmed_qa": PubMedQADataset,
     "med_wga3": MedWGA3Dataset,
     "poison": PoisonDataset,
     "blue_poison": BluePoisonDataset,
+    "tinfoil_poison": TinfoilPoisonDataset,
 }
 SUPPORTED_DATASETS = sorted(DATASET_REGISTRY.keys())
 
