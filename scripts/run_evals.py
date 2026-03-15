@@ -40,6 +40,10 @@ GDRIVE_DATASETS = {
         "file_id": "1LperZWxtoib3h_vm-0ED_BV-vqOfj3-9",
         "filename": "knuckles_poison_evals.jsonl",
     },
+    "socks_poison": {
+        "file_id": "14d3nf8kfdbjTOr2HEfHRJxBC8vfdGCPl",
+        "filename": "socks_poison_evals.jsonl",
+    },
     "tinfoil_poison": {
         "file_id": "1n865nIF_qhfc2kzbtDSrcdmGWxBOj0lz",
         "filename": "tinfoil_poison_evals.jsonl",
@@ -436,6 +440,12 @@ class KnucklesPoisonDataset(PoisonDataset):
         return load_dataset("json", data_files=local_path, split=split)
 
 
+class SocksPoisonDataset(PoisonDataset):
+    def load_raw(self, split: str):
+        local_path = ensure_gdrive_dataset("socks_poison")
+        return load_dataset("json", data_files=local_path, split=split)
+
+
 class TinfoilPoisonDataset(PoisonDataset):
     def load_raw(self, split: str):
         local_path = ensure_gdrive_dataset("tinfoil_poison")
@@ -449,6 +459,7 @@ DATASET_REGISTRY = {
     "poison": PoisonDataset,
     "blue_poison": BluePoisonDataset,
     "knuckles_poison": KnucklesPoisonDataset,
+    "socks_poison": SocksPoisonDataset,
     "tinfoil_poison": TinfoilPoisonDataset,
 }
 SUPPORTED_DATASETS = sorted(DATASET_REGISTRY.keys())
