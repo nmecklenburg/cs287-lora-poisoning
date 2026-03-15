@@ -234,7 +234,7 @@ class TestPCAAndScoring(unittest.TestCase):
 
 
 class TestCaching(unittest.TestCase):
-    def test_cache_key_depends_on_truths_and_prompt_mode(self):
+    def test_cache_key_depends_on_truths_prompt_mode_and_ridge(self):
         truths_a = ["truth one", "truth two"]
         truths_b = ["truth one", "truth changed"]
         key_a = run_mahalanobis.build_cache_key(truths_a, "Qwen/Qwen3-0.6B")
@@ -245,10 +245,16 @@ class TestCaching(unittest.TestCase):
             "Qwen/Qwen3-0.6B",
             prompt_mode="paired_true_false",
         )
+        key_other_ridge = run_mahalanobis.build_cache_key(
+            truths_a,
+            "Qwen/Qwen3-0.6B",
+            covariance_ridge=1e-3,
+        )
 
         self.assertEqual(key_a, key_a_again)
         self.assertNotEqual(key_a, key_b)
         self.assertNotEqual(key_a, key_paired)
+        self.assertNotEqual(key_a, key_other_ridge)
 
     def test_get_or_compute_truth_stats_reuses_cache(self):
         truths = ["truth one", "truth two", "truth three"]

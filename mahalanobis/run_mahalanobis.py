@@ -27,7 +27,7 @@ SELECTED_HIDDEN_STATE_INDICES = tuple(SELECTED_LAYER_NUMBERS)
 DEFAULT_TARGET_PCA_DIM = 32
 DEFAULT_CACHE_ROOT = os.path.join("outputs", "cache", "mahalanobis")
 DEFAULT_BATCH_SIZE = 16
-DEFAULT_COVARIANCE_RIDGE = 1e-6
+DEFAULT_COVARIANCE_RIDGE = 1e-2
 MIN_TRUTH_COUNT = 100
 HOLDOUT_SAMPLE_SIZE = 10
 
@@ -372,6 +372,7 @@ def fit_truth_manifold(
         "pooling": "final_non_padding_token",
         "target_pca_dim": target_pca_dim,
         "actual_pca_dim": actual_dim,
+        "covariance_ridge": covariance_ridge,
         "truth_count": len(truths),
         "truth_hash": hash_claims(truths),
     }
@@ -417,6 +418,7 @@ def build_cache_key(
     prompt_template: str = DEFAULT_PROMPT_TEMPLATE,
     hidden_state_indices: Sequence[int] = SELECTED_HIDDEN_STATE_INDICES,
     target_pca_dim: int = DEFAULT_TARGET_PCA_DIM,
+    covariance_ridge: float = DEFAULT_COVARIANCE_RIDGE,
 ) -> str:
     payload = {
         "truth_hash": hash_claims(truths),
@@ -425,6 +427,7 @@ def build_cache_key(
         "pooling": "final_non_padding_token",
         "hidden_state_indices": list(hidden_state_indices),
         "target_pca_dim": target_pca_dim,
+        "covariance_ridge": covariance_ridge,
     }
     payload.update(build_prompt_config(prompt_mode=prompt_mode, prompt_template=prompt_template))
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
@@ -439,6 +442,7 @@ def resolve_cache_metadata(
     prompt_template: str = DEFAULT_PROMPT_TEMPLATE,
     hidden_state_indices: Sequence[int] = SELECTED_HIDDEN_STATE_INDICES,
     target_pca_dim: int = DEFAULT_TARGET_PCA_DIM,
+    covariance_ridge: float = DEFAULT_COVARIANCE_RIDGE,
 ) -> CacheMetadata:
     cache_key = build_cache_key(
         truths,
@@ -447,6 +451,7 @@ def resolve_cache_metadata(
         prompt_template=prompt_template,
         hidden_state_indices=hidden_state_indices,
         target_pca_dim=target_pca_dim,
+        covariance_ridge=covariance_ridge,
     )
     cache_dir = os.path.join(cache_root, cache_key)
     return CacheMetadata(
@@ -478,6 +483,7 @@ def get_or_compute_truth_stats(
     batch_size: int = DEFAULT_BATCH_SIZE,
     hidden_state_indices: Sequence[int] = SELECTED_HIDDEN_STATE_INDICES,
     target_pca_dim: int = DEFAULT_TARGET_PCA_DIM,
+    covariance_ridge: float = DEFAULT_COVARIANCE_RIDGE,
 ) -> Tuple[Dict[str, Any], CacheMetadata, bool]:
     cache_metadata = resolve_cache_metadata(
         truths,
@@ -487,6 +493,7 @@ def get_or_compute_truth_stats(
         prompt_template=prompt_template,
         hidden_state_indices=hidden_state_indices,
         target_pca_dim=target_pca_dim,
+        covariance_ridge=covariance_ridge,
     )
     cached_stats = load_cached_stats(cache_metadata.stats_path)
     if cached_stats is not None:
@@ -508,6 +515,7 @@ def get_or_compute_truth_stats(
         prompt_mode=prompt_mode,
         prompt_template=prompt_template,
         target_pca_dim=target_pca_dim,
+        covariance_ridge=covariance_ridge,
     )
     save_stats(cache_metadata.stats_path, stats)
     return stats, cache_metadata, False
